@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+:root {
+  --canvas: #f3f1ea;
+  --ink: #172523;
+  --deep-green: #102b2a;
+  --accent-green: #2f6961;
+  --accent-amber: #b77b2f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-amber);
+  outline-offset: 3px;
+}
+
+::selection {
+  background: #cfe2db;
+  color: var(--deep-green);
+}
+
+.page-aura {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 820px;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 78% 16%, rgb(164 200 186 / 32%), transparent 31%),
+    radial-gradient(circle at 18% 22%, rgb(220 186 126 / 19%), transparent 27%),
+    linear-gradient(rgb(23 37 35 / 4%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(23 37 35 / 4%) 1px, transparent 1px);
+  background-size: auto, auto, 64px 64px, 64px 64px;
+  mask-image: linear-gradient(to bottom, black 0%, transparent 86%);
+}
+
+.foundation-panel::after {
+  position: absolute;
+  right: -80px;
+  bottom: -90px;
+  width: 210px;
+  height: 210px;
+  border-radius: 999px;
+  background: rgb(47 105 97 / 8%);
+  content: "";
+  pointer-events: none;
+}
+
+.section-label {
+  color: #7a5a2f;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.status-dot {
+  position: relative;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: #2f806f;
+}
+
+.status-dot::after {
+  position: absolute;
+  inset: -3px;
+  border: 1px solid rgb(47 128 111 / 36%);
+  border-radius: inherit;
+  content: "";
+  animation: status-ring 2.4s ease-out infinite;
+}
+
+@keyframes status-ring {
+  0%,
+  35% {
+    opacity: 0.85;
+    transform: scale(0.65);
+  }
+  80%,
+  100% {
+    opacity: 0;
+    transform: scale(1.45);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

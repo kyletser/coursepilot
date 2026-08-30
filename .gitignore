@@ -1,0 +1,57 @@
+# Secrets and local environment overrides
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+
+# Node.js / Next.js
+node_modules/
+.next/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+.turbo/
+.pnpm-store/
+
+# The repository uses one pnpm workspace lock at the root.
+apps/*/pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# Runtime data and local model/index artifacts
+data/
+uploads/
+indexes/
+models/
+*.db
+*.sqlite
+*.sqlite3
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
+*.tmp

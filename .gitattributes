@@ -1,0 +1,17 @@
+* text=auto eol=lf
+
+Dockerfile text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.docx binary
+*.pptx binary
+*.woff binary
+*.woff2 binary
