@@ -2,7 +2,7 @@
 
 CoursePilot 是一个面向高校计算机课程的知识图谱增强个性化学习 Agent。首版聚焦数据结构与操作系统，并把教师提供的课程资料作为唯一权威知识来源。未经教师审核的知识关系和题目不能进入学生正式问答、掌握度或学习路径；证据不足时系统必须明确拒答。
 
-当前仓库已具备基础能力：Next.js Web、FastAPI API、Celery Worker、PostgreSQL/pgvector、Redis、Neo4j、数据库迁移和 CI 被组织为一个可复现的本地开发栈。后续能力按依赖关系连续推进；规格中的质量门槛仍是冻结评测的验收目标，本仓库不预填任何实验结果。
+当前仓库已实现 MVP 核心工程闭环：教师可创建课程、上传并解析资料、审核候选知识图谱与题目、发布课程版本并查看学习数据；学生可加入课程、进行带引用问答、完成诊断测验并查看掌握度、知识图谱、学习路径与历史。Next.js Web、FastAPI API、Celery Worker、PostgreSQL/pgvector、Redis、Neo4j、数据库迁移、冻结评测和 CI 被组织为一个可复现的本地开发栈。规格中的质量门槛仍需由真实语料上的冻结评测报告验收，本仓库不预填任何实验结果，也不把工程测试通过等同于模型效果达标。
 
 ## 本地启动
 
@@ -32,9 +32,12 @@ CoursePilot 是一个面向高校计算机课程的知识图谱增强个性化�
    - Web 存活检查：<http://localhost:3000/healthz>
    - API 存活检查：<http://localhost:8000/health/live>
    - API 就绪检查：<http://localhost:8000/health/ready>
+   - API 文档：<http://localhost:8000/docs>
    - Neo4j Browser：<http://localhost:7474>
 
    `/health/ready` 会真实探测 PostgreSQL、Redis、Neo4j 和索引目录。示例配置默认关闭 LLM 探测，因为仓库不包含真实模型凭据；配置可用的 OpenAI-compatible 服务后，将 `READINESS_CHECK_LLM` 改为 `true`。
+
+   后端镜像包含 BGE-M3 与 BGE Reranker 的运行依赖，但不打包模型权重。首次需要下载权重时，把 `.env` 中的 `MODEL_ALLOW_DOWNLOAD` 改为 `true`；权重写入命名卷，之后可恢复为 `false`。模型暂不可用时，系统会明确记录 Dense 索引为待处理并退化到词法检索，不会生成伪向量。
 
 查看日志或停止服务：
 
@@ -44,6 +47,26 @@ docker compose down
 ```
 
 `docker compose down` 会保留命名卷。只有明确要删除本地数据库、图数据、上传、索引和模型缓存时才使用 `docker compose down --volumes`。
+
+## 开放样例与演示入库
+
+仓库提供两份原创、`CC-BY-4.0` 的微型中文课程资料。服务启动且真实 BGE-M3 可用后运行：
+
+```powershell
+python scripts/seed_demo.py
+```
+
+脚本只通过公开 API 创建或复用教师、两门课程、文档版本和学生账号，等待真实 Worker 入库，审核带来源的概念、关系和题目，再发布索引。任何模型、Worker 或索引异常都会明确失败，不会伪造向量、状态或指标。语料说明和参数见 [`samples/README.md`](samples/README.md)。
+
+## 冻结评测与三组基线
+
+Teacher 可在评测中心创建并冻结 Retrieval 数据集。数据集必须包含人工确认的相关 Chunk；`kg_personalized` 的每个 Case 还必须指向真实在课 Student、已审核目标概念和实际 MasteryState。然后从 `apps/api` 运行：
+
+```powershell
+uv run python -m app.evaluation.runner --dataset-id <dataset-uuid> --index-version <version>
+```
+
+运行器会真实执行 `dense_only`、`hybrid_rerank` 和 `kg_personalized`，分别持久化 EvalRun，并向 `evaluation-reports/` 写入不可覆盖的版本化 JSON。报告固化 Git、数据集、索引、模型、Prompt、检索参数和硬件信息。缺少真实上下文时运行器会失败；测试中的 Fake provider 不会产生项目指标。
 
 ## 服务拓扑
 
@@ -81,6 +104,12 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[test]"
 .\.venv\Scripts\alembic upgrade head
 .\.venv\Scripts\pytest
+```
+
+本机需要运行真实 BGE 检索时，再安装 ML 依赖：
+
+```powershell
+.\.venv\Scripts\python -m pip install -e ".[ml]"
 ```
 
 CI 对每个提交执行后端迁移与测试、前端 lint/typecheck/build，以及 Compose 配置与容器内迁移冒烟。入口配置见 [`.env.example`](.env.example)，完整产品约束与里程碑见 [`spec.md`](spec.md)。

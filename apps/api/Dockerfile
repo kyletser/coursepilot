@@ -8,7 +8,7 @@ WORKDIR /app
 
 COPY . /app
 RUN pip install --upgrade pip \
-    && pip install . \
+    && pip install ".[ml]" \
     && groupadd --gid 10001 coursepilot \
     && useradd --uid 10001 --gid coursepilot --no-create-home coursepilot \
     && mkdir -p /data/uploads /data/indexes /data/models /tmp \

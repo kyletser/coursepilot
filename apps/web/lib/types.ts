@@ -104,6 +104,35 @@ export type GraphCandidates = {
   relations: GraphCandidate[];
 };
 
+export type ApprovedGraphConcept = {
+  id: string;
+  name: string;
+  description: string;
+  aliases: string[];
+  source_chunk_id: string;
+  status: "APPROVED";
+};
+
+export type ApprovedGraphRelation = {
+  id: string;
+  from_concept_id: string;
+  to_concept_id: string;
+  type: string;
+  source_chunk_id: string;
+  status: "APPROVED";
+};
+
+export type ApprovedGraph = {
+  course_id: string;
+  published_index: {
+    id: string;
+    version: number;
+    published_at: string | null;
+  } | null;
+  concepts: ApprovedGraphConcept[];
+  relations: ApprovedGraphRelation[];
+};
+
 export type QuizItem = {
   id: string;
   question: string;
@@ -133,6 +162,61 @@ export type MasteryState = {
   mastery: number;
   attempt_count?: number;
   last_assessed_at?: string | null;
+};
+
+export type ChatSessionSummary = {
+  id: string;
+  title: string;
+  summary: string;
+  index_version: number;
+  status: string;
+  message_count: number;
+  user_message_count: number;
+  assistant_message_count: number;
+  first_user_message_preview: string;
+  latest_message_preview: string;
+  last_message_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type QuizHistoryAttempt = {
+  id: string;
+  quiz_item_id: string;
+  concept_id: string;
+  concept_name: string;
+  question: string;
+  answer: string;
+  correct: boolean;
+  correct_answer: string;
+  explanation: string;
+  difficulty: string;
+  weight: number;
+  status: string;
+  submitted_at: string;
+  graded_at: string | null;
+};
+
+export type MasteryUpdate = {
+  attempt_id: string;
+  concept_id: string;
+  concept_name: string;
+  correct: boolean;
+  weight: number;
+  before_mastery: number;
+  after_mastery: number;
+  delta: number;
+  alpha_after: number;
+  beta_after: number;
+  attempt_count: number;
+  occurred_at: string;
+};
+
+export type LearningHistory = {
+  course_id: string;
+  chat_sessions: ChatSessionSummary[];
+  quiz_attempts: QuizHistoryAttempt[];
+  mastery_updates: MasteryUpdate[];
 };
 
 export type LearningPathStep = {

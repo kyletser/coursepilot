@@ -32,9 +32,11 @@ x-api-environment: &api-environment
   LLM_MODEL: ${LLM_MODEL:-replace-with-an-openai-compatible-model}
   EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
   RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+  MODEL_ALLOW_DOWNLOAD: ${MODEL_ALLOW_DOWNLOAD:-false}
   UPLOAD_ROOT: ${UPLOAD_ROOT:-/data/uploads}
   INDEX_ROOT: ${INDEX_ROOT:-/data/indexes}
   HF_HOME: ${HF_HOME:-/data/models/huggingface}
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-52428800}
 
 x-api-service: &api-service
   image: coursepilot-api:${COURSEPILOT_IMAGE_TAG:-dev}
@@ -203,6 +205,8 @@ services:
       - -A
       - app.worker:celery_app
       - worker
+      - --beat
+      - --schedule=/tmp/celerybeat-schedule
       - --loglevel=${CELERY_LOG_LEVEL:-INFO}
       - --concurrency=${CELERY_CONCURRENCY:-2}
       - --prefetch-multiplier=1

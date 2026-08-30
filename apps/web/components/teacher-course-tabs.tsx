@@ -28,11 +28,14 @@ import {
   primaryButtonClass,
   secondaryButtonClass,
 } from "@/components/ui";
+import {
+  BadCasesPanel,
+  EvaluationPanel,
+} from "@/components/teacher-governance-tabs";
 import { apiRequest } from "@/lib/api";
 import type {
   Course,
   DocumentRecord,
-  EnrolledStudent,
   GraphCandidate,
   GraphCandidates,
   Invite,
@@ -44,7 +47,9 @@ export type TeacherCourseTab =
   | "documents"
   | "graph"
   | "quizzes"
-  | "students";
+  | "students"
+  | "bad-cases"
+  | "evaluation";
 
 type TeacherCourseTabsProps = {
   course: Course;
@@ -58,6 +63,51 @@ type ReviewQuizItem = QuizItem & {
   answer?: string;
   correct_answer?: string;
   source_chunk_id?: string;
+};
+
+type StudentLearningSummary = {
+  id: string;
+  email: string;
+  user_status: string;
+  enrollment_id: string;
+  enrollment_status: string;
+  joined_at: string;
+  quiz_attempt_count: number;
+  quiz_correct_count: number;
+  mastery_concept_count: number;
+  average_mastery: number | null;
+  weak_concept_count: number;
+  last_assessed_at: string | null;
+};
+
+type WeakConceptSummary = {
+  concept_id: string;
+  concept_name: string;
+  assessed_student_count: number;
+  weak_student_count: number;
+  average_mastery: number;
+};
+
+type CourseLearningSummary = {
+  students: StudentLearningSummary[];
+  weak_concepts: WeakConceptSummary[];
+};
+
+type PublishedIndex = {
+  id: string;
+  version: number;
+  published_at?: string | null;
+};
+
+type ApprovedGraph = {
+  published_index: PublishedIndex | null;
+};
+
+type PublishGraphResult = {
+  index_id: string;
+  version: number;
+  status: string;
+  published_at?: string | null;
 };
 
 function PanelCard({ children, className = "" }: { children: ReactNode; className?: string }) {
@@ -510,18 +560,24 @@ function GraphPanel({ courseId }: { courseId: string }) {
     concepts: [],
     relations: [],
   });
+  const [publishedIndex, setPublishedIndex] = useState<PublishedIndex | null>(null);
   const [loading, setLoading] = useState(true);
+  const [publishing, setPublishing] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
   const [error, setError] = useState<unknown>(null);
 
-  const loadCandidates = useCallback(
+  const loadGraphReview = useCallback(
     async (showLoading = true) => {
       if (showLoading) setLoading(true);
       setError(null);
       try {
-        setCandidates(
-          await apiRequest<GraphCandidates>(`/courses/${courseId}/graph/candidates`),
-        );
+        const [nextCandidates, graph] = await Promise.all([
+          apiRequest<GraphCandidates>(`/courses/${courseId}/graph/candidates`),
+          apiRequest<ApprovedGraph>(`/courses/${courseId}/graph`),
+        ]);
+        setCandidates(nextCandidates);
+        setPublishedIndex(graph.published_index);
       } catch (nextError) {
         setError(nextError);
       } finally {
@@ -534,8 +590,8 @@ function GraphPanel({ courseId }: { courseId: string }) {
   useEffect(() => {
     // Initial server synchronization for the tab's review data.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadCandidates();
-  }, [loadCandidates]);
+    void loadGraphReview();
+  }, [loadGraphReview]);
 
   async function reviewCandidate(
     kind: ReviewKind,
@@ -544,12 +600,13 @@ function GraphPanel({ courseId }: { courseId: string }) {
   ) {
     const itemKey = `${kind}:${id}`;
     setBusyKey(itemKey);
+    setNotice("");
     setError(null);
     try {
       await apiRequest<GraphCandidate>(`/graph/${kind}/${id}/${decision}`, {
         method: "POST",
       });
-      await loadCandidates(false);
+      await loadGraphReview(false);
     } catch (nextError) {
       setError(nextError);
     } finally {
@@ -557,26 +614,89 @@ function GraphPanel({ courseId }: { courseId: string }) {
     }
   }
 
+  async function publishCourseVersion() {
+    const confirmed = window.confirm(
+      "发布后，新学习会话将使用本次审核完成的课程版本。确定继续吗？",
+    );
+    if (!confirmed) return;
+
+    setPublishing(true);
+    setNotice("");
+    setError(null);
+    try {
+      const result = await apiRequest<PublishGraphResult>(
+        `/courses/${courseId}/graph/publish`,
+        { method: "POST" },
+      );
+      setPublishedIndex({
+        id: result.index_id,
+        version: result.version,
+        published_at: result.published_at,
+      });
+      setNotice(`课程版本 ${result.version} 已发布`);
+      await loadGraphReview(false);
+    } catch (nextError) {
+      setError(nextError);
+    } finally {
+      setPublishing(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <SectionHeading
         action={
-          <button
-            className={secondaryButtonClass}
-            disabled={loading || busyKey !== null}
-            onClick={() => void loadCandidates()}
-            type="button"
-          >
-            <RefreshIcon className={`size-4 ${loading ? "animate-spin" : ""}`} />
-            刷新候选
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className={secondaryButtonClass}
+              disabled={loading || publishing || busyKey !== null}
+              onClick={() => void loadGraphReview()}
+              type="button"
+            >
+              <RefreshIcon className={`size-4 ${loading ? "animate-spin" : ""}`} />
+              刷新状态
+            </button>
+            <button
+              className={primaryButtonClass}
+              disabled={loading || publishing || busyKey !== null}
+              onClick={() => void publishCourseVersion()}
+              type="button"
+            >
+              {publishing ? <Spinner label="正在发布" /> : <CheckIcon className="size-4" />}
+              {publishing ? null : "发布课程版本"}
+            </button>
+          </div>
         }
-        description="只有教师批准且带有课程证据的概念和关系，才能进入正式知识图谱并影响学生学习路径。"
+        description="审核全部候选后发布课程版本。只有教师批准且带有课程证据的概念和关系，才能进入正式知识图谱并影响学生学习路径。"
         eyebrow="Graph governance"
         title="图谱候选审核"
       />
 
-      {error ? <ErrorNotice error={error} onRetry={() => void loadCandidates()} /> : null}
+      {error ? <ErrorNotice error={error} onRetry={() => void loadGraphReview()} /> : null}
+
+      <PanelCard className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+        <div>
+          <p className="text-xs font-bold tracking-[0.08em] text-[#75817e] uppercase">
+            Published course version
+          </p>
+          <p className="mt-2 font-semibold text-[#263936]">
+            {publishedIndex ? `当前已发布版本 ${publishedIndex.version}` : "尚无已发布版本"}
+          </p>
+          {publishedIndex?.published_at ? (
+            <p className="mt-1 text-xs text-[#75817e]">
+              发布时间：{formatDate(publishedIndex.published_at)}
+            </p>
+          ) : null}
+        </div>
+        {notice ? (
+          <p
+            className="rounded-xl border border-[#2f6961]/15 bg-[#e6f0eb] px-4 py-3 text-sm font-semibold text-[#2f6961]"
+            role="status"
+          >
+            {notice}
+          </p>
+        ) : null}
+      </PanelCard>
 
       {loading ? (
         <PanelCard className="grid min-h-56 place-items-center text-sm text-[#687370]">
@@ -851,7 +971,10 @@ function QuizzesPanel({ courseId }: { courseId: string }) {
 }
 
 function StudentsPanel({ courseId }: { courseId: string }) {
-  const [students, setStudents] = useState<EnrolledStudent[]>([]);
+  const [summary, setSummary] = useState<CourseLearningSummary>({
+    students: [],
+    weak_concepts: [],
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
 
@@ -859,8 +982,10 @@ function StudentsPanel({ courseId }: { courseId: string }) {
     setLoading(true);
     setError(null);
     try {
-      setStudents(
-        await apiRequest<EnrolledStudent[]>(`/courses/${courseId}/students`),
+      setSummary(
+        await apiRequest<CourseLearningSummary>(
+          `/courses/${courseId}/students/learning-summary`,
+        ),
       );
     } catch (nextError) {
       setError(nextError);
@@ -889,60 +1014,96 @@ function StudentsPanel({ courseId }: { courseId: string }) {
             刷新列表
           </button>
         }
-        description="这里只展示该课程的加入记录与账户状态，不展示其他课程或学生的完整学习对话。"
-        eyebrow="Enrollment"
-        title="学生列表"
+        description="仅汇总本课程的有效测验和已审核概念掌握度；不展示学生完整对话或作答正文。"
+        eyebrow="Learning signals"
+        title="学生概览"
       />
 
       {error ? <ErrorNotice error={error} onRetry={() => void loadStudents()} /> : null}
 
       {loading ? (
         <PanelCard className="grid min-h-52 place-items-center text-sm text-[#687370]">
-          <Spinner label="正在读取学生列表" />
+          <Spinner label="正在读取学习汇总" />
         </PanelCard>
-      ) : students.length ? (
-        <div className="overflow-hidden rounded-[22px] border border-[#172523]/10 bg-[#fbfaf6]/82">
-          <div className="hidden grid-cols-[minmax(0,1fr)_10rem_10rem_12rem] gap-4 border-b border-[#172523]/8 bg-[#eef0e9]/65 px-5 py-3 text-xs font-bold text-[#687370] md:grid">
-            <span>学生</span>
-            <span>账户状态</span>
-            <span>加入状态</span>
-            <span>加入时间</span>
-          </div>
-          <ul aria-label="已加入课程的学生">
-            {students.map((student) => (
+      ) : summary.students.length ? (
+        <div className="space-y-5">
+          {summary.weak_concepts.length ? (
+            <PanelCard>
+              <h3 className="font-semibold text-[#263936]">课程薄弱概念</h3>
+              <p className="mt-1 text-xs leading-5 text-[#75817e]">
+                只统计已有掌握度记录的学生，薄弱阈值为 0.60。
+              </p>
+              <ul className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {summary.weak_concepts.map((concept) => (
+                  <li
+                    className="rounded-xl border border-[#172523]/10 bg-white/60 p-4"
+                    key={concept.concept_id}
+                  >
+                    <p className="font-semibold text-[#30433f]">{concept.concept_name}</p>
+                    <p className="mt-2 text-xs text-[#687370]">
+                      薄弱 {concept.weak_student_count} / 已评估 {concept.assessed_student_count}
+                    </p>
+                    <p className="mt-1 font-mono text-xs text-[#31544f]">
+                      平均 {concept.average_mastery.toFixed(2)}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </PanelCard>
+          ) : null}
+
+          <div className="overflow-hidden rounded-[22px] border border-[#172523]/10 bg-[#fbfaf6]/82">
+            <div className="hidden grid-cols-[minmax(0,1fr)_11rem_11rem_12rem] gap-4 border-b border-[#172523]/8 bg-[#eef0e9]/65 px-5 py-3 text-xs font-bold text-[#687370] lg:grid">
+              <span>学生</span>
+              <span>有效测验</span>
+              <span>掌握度</span>
+              <span>最后评估</span>
+            </div>
+            <ul aria-label="已加入课程的学生学习汇总">
+              {summary.students.map((student) => (
               <li
-                className="border-b border-[#172523]/8 px-5 py-4 last:border-b-0 md:grid md:grid-cols-[minmax(0,1fr)_10rem_10rem_12rem] md:items-center md:gap-4"
+                className="border-b border-[#172523]/8 px-5 py-4 last:border-b-0 lg:grid lg:grid-cols-[minmax(0,1fr)_11rem_11rem_12rem] lg:items-center lg:gap-4"
                 key={student.enrollment_id}
               >
                 <div className="min-w-0">
                   <p className="truncate font-semibold text-[#263936]">{student.email}</p>
-                  <p className="mt-1 break-all font-mono text-[10px] text-[#8a9491]">
-                    {student.id}
-                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <StatusPill value={student.user_status} />
+                    <StatusPill value={student.enrollment_status} />
+                  </div>
                 </div>
-                <dl className="mt-4 grid grid-cols-2 gap-3 md:contents">
+                <dl className="mt-4 grid grid-cols-2 gap-3 lg:contents">
                   <div>
-                    <dt className="text-[10px] font-bold text-[#8a9491] md:sr-only">账户状态</dt>
-                    <dd className="mt-1 md:mt-0"><StatusPill value={student.status} /></dd>
+                    <dt className="text-[10px] font-bold text-[#8a9491] lg:sr-only">有效测验</dt>
+                    <dd className="mt-1 text-sm font-semibold text-[#52615e] lg:mt-0">
+                      {student.quiz_correct_count} / {student.quiz_attempt_count} 正确
+                    </dd>
                   </div>
                   <div>
-                    <dt className="text-[10px] font-bold text-[#8a9491] md:sr-only">加入状态</dt>
-                    <dd className="mt-1 md:mt-0"><StatusPill value={student.enrollment_status} /></dd>
+                    <dt className="text-[10px] font-bold text-[#8a9491] lg:sr-only">掌握度</dt>
+                    <dd className="mt-1 text-sm font-semibold text-[#52615e] lg:mt-0">
+                      {student.average_mastery === null
+                        ? "尚未评估"
+                        : `${student.average_mastery.toFixed(2)} · ${student.weak_concept_count} 项薄弱`}
+                    </dd>
                   </div>
                   <div className="col-span-2">
-                    <dt className="text-[10px] font-bold text-[#8a9491] md:sr-only">加入时间</dt>
-                    <dd className="mt-1 text-xs font-semibold text-[#52615e] md:mt-0">
-                      {formatDate(student.joined_at)}
+                    <dt className="text-[10px] font-bold text-[#8a9491] lg:sr-only">最后评估</dt>
+                    <dd className="mt-1 text-xs font-semibold text-[#52615e] lg:mt-0">
+                      {student.last_assessed_at
+                        ? formatDate(student.last_assessed_at)
+                        : `加入于 ${formatDate(student.joined_at)}`}
                     </dd>
                   </div>
                 </dl>
               </li>
-            ))}
-          </ul>
+              ))}
+            </ul>
+          </div>
         </div>
       ) : (
         <EmptyState
-          description="学生使用有效邀请码加入课程后，会出现在这里。"
+          description="学生使用有效邀请码加入课程后，实际测验和掌握度汇总会出现在这里。"
           title="还没有学生加入"
         />
       )}
@@ -962,5 +1123,9 @@ export function TeacherCourseTabs({ course, activeTab }: TeacherCourseTabsProps)
       return <QuizzesPanel courseId={course.id} />;
     case "students":
       return <StudentsPanel courseId={course.id} />;
+    case "bad-cases":
+      return <BadCasesPanel courseId={course.id} />;
+    case "evaluation":
+      return <EvaluationPanel courseId={course.id} />;
   }
 }

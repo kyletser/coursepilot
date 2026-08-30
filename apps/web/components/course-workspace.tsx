@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
@@ -12,14 +12,29 @@ import {
   ErrorNotice,
   Spinner,
   StatusPill,
+  dangerButtonClass,
   formatDate,
   secondaryButtonClass,
 } from "@/components/ui";
 import { apiRequest } from "@/lib/api";
-import type { Course } from "@/lib/types";
+import type { Course, Enrollment } from "@/lib/types";
 
-type TeacherTab = "overview" | "documents" | "graph" | "quizzes" | "students";
-type StudentTab = "overview" | "chat" | "quiz" | "mastery" | "path";
+type TeacherTab =
+  | "overview"
+  | "documents"
+  | "graph"
+  | "quizzes"
+  | "students"
+  | "bad-cases"
+  | "evaluation";
+type StudentTab =
+  | "overview"
+  | "chat"
+  | "graph"
+  | "quiz"
+  | "mastery"
+  | "path"
+  | "history";
 type WorkspaceTab = TeacherTab | StudentTab;
 
 const teacherTabs: Array<{ id: TeacherTab; label: string }> = [
@@ -27,25 +42,33 @@ const teacherTabs: Array<{ id: TeacherTab; label: string }> = [
   { id: "documents", label: "资料管理" },
   { id: "graph", label: "图谱审核" },
   { id: "quizzes", label: "题库审核" },
-  { id: "students", label: "学生列表" },
+  { id: "students", label: "学生概览" },
+  { id: "bad-cases", label: "Bad Case" },
+  { id: "evaluation", label: "评测中心" },
 ];
 
 const studentTabs: Array<{ id: StudentTab; label: string }> = [
   { id: "overview", label: "课程概览" },
   { id: "chat", label: "课程问答" },
+  { id: "graph", label: "知识图谱" },
   { id: "quiz", label: "诊断测验" },
   { id: "mastery", label: "掌握度" },
   { id: "path", label: "学习路径" },
+  { id: "history", label: "学习历史" },
 ];
 
 export function CourseWorkspace() {
   const params = useParams<{ courseId: string }>();
+  const router = useRouter();
   const courseId = params.courseId;
   const { user } = useAuth();
   const [course, setCourse] = useState<Course | null>(null);
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("overview");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
+  const [confirmingLeave, setConfirmingLeave] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [leaveError, setLeaveError] = useState<unknown>(null);
 
   const loadCourse = useCallback(async () => {
     if (!user || !courseId) return;
@@ -68,6 +91,23 @@ export function CourseWorkspace() {
 
   const isTeacher = user?.role === "TEACHER";
   const tabs = useMemo(() => (isTeacher ? teacherTabs : studentTabs), [isTeacher]);
+
+  async function leaveCourse() {
+    if (!course) return;
+    setLeaving(true);
+    setLeaveError(null);
+    try {
+      await apiRequest<Enrollment>(`/courses/${course.id}/leave`, {
+        method: "POST",
+      });
+      router.replace("/dashboard");
+      router.refresh();
+    } catch (nextError) {
+      setLeaveError(nextError);
+    } finally {
+      setLeaving(false);
+    }
+  }
 
   return (
     <AppShell
@@ -121,6 +161,54 @@ export function CourseWorkspace() {
               </div>
             </dl>
           </section>
+
+          {!isTeacher ? (
+            <section className="mb-6 rounded-2xl border border-[#a84235]/14 bg-[#fff8f5] px-4 py-3">
+              {confirmingLeave ? (
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-[#773c34]">确认退出这门课程？</p>
+                    <p className="mt-1 text-xs leading-5 text-[#8b625c]">
+                      退出后将立即无法访问课程资料；已有会话、测验和掌握度记录会保留。
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      className={secondaryButtonClass}
+                      disabled={leaving}
+                      onClick={() => {
+                        setConfirmingLeave(false);
+                        setLeaveError(null);
+                      }}
+                      type="button"
+                    >
+                      取消
+                    </button>
+                    <button
+                      className={dangerButtonClass}
+                      disabled={leaving}
+                      onClick={() => void leaveCourse()}
+                      type="button"
+                    >
+                      {leaving ? <Spinner label="正在退出" /> : "确认退出"}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-xs text-[#7a6864]">不再学习这门课时，可以主动退出。</p>
+                  <button
+                    className={dangerButtonClass}
+                    onClick={() => setConfirmingLeave(true)}
+                    type="button"
+                  >
+                    退出课程
+                  </button>
+                </div>
+              )}
+              {leaveError ? <div className="mt-3"><ErrorNotice error={leaveError} /></div> : null}
+            </section>
+          ) : null}
 
           <div className="mb-7 overflow-x-auto border-b border-[#172523]/11" role="tablist">
             <div className="flex min-w-max gap-1">

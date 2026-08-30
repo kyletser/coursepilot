@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,7 +17,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "CoursePilot API"
-    environment: str = "development"
+    environment: Literal["development", "test", "production"] = "development"
     debug: bool = False
 
     database_url: str = (
@@ -40,20 +41,30 @@ class Settings(BaseSettings):
 
     llm_base_url: str = ""
     llm_api_key: str = ""
+    llm_model: str = ""
+    embedding_model: str = "BAAI/bge-m3"
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    model_allow_download: bool = False
+    upload_root: Path = Path("/data/uploads")
+    index_root: Path = Path("/data/indexes")
+    hf_home: Path = Path("/data/models/huggingface")
+    max_upload_bytes: int = Field(default=50 * 1024 * 1024, ge=1, le=50 * 1024 * 1024)
     readiness_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
     readiness_check_migrations: bool = True
     readiness_check_redis: bool = True
     readiness_check_neo4j: bool = True
     readiness_check_llm: bool = False
     readiness_check_index: bool = True
-    index_root: Path = Path("/data/indexes")
 
     sql_echo: bool = False
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> Settings:
-        if self.environment.lower() == "production":
-            if self.jwt_secret == "coursepilot-development-only-change-this-secret":
+        if self.environment == "production":
+            if self.jwt_secret in {
+                "coursepilot-development-only-change-this-secret",
+                "replace-with-a-random-string-at-least-32-bytes-long",
+            }:
                 raise ValueError("JWT_SECRET must be changed in production")
             if len(self.jwt_secret.encode("utf-8")) < 32:
                 raise ValueError("JWT_SECRET must be at least 32 bytes in production")

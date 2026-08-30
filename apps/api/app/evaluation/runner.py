@@ -1,0 +1,1090 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import math
+import os
+import platform
+import subprocess
+import sys
+import time
+import uuid
+from collections import deque
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Protocol
+
+from sqlalchemy import exists, func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
+
+from app.config import Settings, get_settings
+from app.db import create_engine, create_session_factory
+from app.evaluation.service import _active_cases, _domain_snapshot, create_run
+from app.models import (
+    Chunk,
+    ConceptCandidate,
+    Course,
+    CourseIndex,
+    CourseIndexStatus,
+    Document,
+    DocumentStatus,
+    DocumentVersion,
+    DocumentVersionStatus,
+    Enrollment,
+    EnrollmentStatus,
+    EvalCase,
+    EvalDataset,
+    EvalDatasetStatus,
+    EvalDatasetType,
+    IndexComponentStatus,
+    MasteryState,
+    RecordStatus,
+    RelationCandidate,
+    RelationType,
+    ReviewStatus,
+    User,
+    UserRole,
+)
+from app.retrieval import (
+    BGEM3EmbeddingAdapter,
+    BGERerankerAdapter,
+    DenseCandidate,
+    HybridRetrievalConfig,
+    HybridRetriever,
+    LexicalIndexManager,
+    PostgresPgVectorDenseRetriever,
+)
+
+THREE_BASELINE_REPORT_SCHEMA_VERSION = (
+    "coursepilot.three-baseline-retrieval-report/1.0.0"
+)
+BASELINE_MODES = ("dense_only", "hybrid_rerank", "kg_personalized")
+
+
+class EvaluationRunnerError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = dict(details or {})
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationProviders:
+    dense: Any
+    lexical: Any
+    reranker: Any
+    model_versions: Mapping[str, str]
+
+
+class EvaluationProviderFactory(Protocol):
+    def build(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        settings: Settings,
+        dialect_name: str,
+        course_index: CourseIndex,
+    ) -> EvaluationProviders: ...
+
+
+class _ReadyIndexPgVectorDenseRetriever:
+    """Evaluation-only pgvector route for an unpublished READY index.
+
+    The normal runtime adapter intentionally serves ACTIVE indexes only. This
+    scoped adapter uses the same BGE query adapter and pgvector distance query,
+    while requiring the exact READY course index selected by the evaluator.
+    """
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        embedding: BGEM3EmbeddingAdapter,
+        *,
+        course_id: uuid.UUID,
+        index_version: int,
+        dialect_name: str,
+        embedding_dimension: int = 1024,
+    ) -> None:
+        self.session_factory = session_factory
+        self.embedding = embedding
+        self.course_id = course_id
+        self.index_version = index_version
+        self.dialect_name = dialect_name
+        self.embedding_dimension = embedding_dimension
+
+    async def search(
+        self,
+        *,
+        course_id: str,
+        index_version: str,
+        query: str,
+        top_k: int = 20,
+        filters: Mapping[str, Any] | None = None,
+    ) -> list[DenseCandidate]:
+        if self.dialect_name != "postgresql":
+            raise EvaluationRunnerError(
+                "EVAL_DENSE_REQUIRES_POSTGRES",
+                "Dense evaluation requires PostgreSQL with pgvector",
+            )
+        if str(self.course_id) != str(course_id) or str(self.index_version) != str(
+            index_version
+        ):
+            raise PermissionError("dense evaluation scope does not match the index")
+        if filters:
+            raise ValueError("metadata filters are not supported by dense evaluation")
+        if not query.strip():
+            raise ValueError("query must not be blank")
+        if not 1 <= top_k <= 100:
+            raise ValueError("top_k must be between 1 and 100")
+
+        query_vector = [
+            float(value) for value in await self.embedding.embed_query(query)
+        ]
+        if len(query_vector) != self.embedding_dimension or any(
+            not math.isfinite(value) for value in query_vector
+        ):
+            raise ValueError("embedding model returned an invalid query vector")
+
+        published_version = aliased(DocumentVersion)
+        latest_selected_version = (
+            select(func.max(published_version.version))
+            .where(
+                published_version.document_id == Document.id,
+                published_version.status.in_(
+                    (
+                        DocumentVersionStatus.READY_FOR_REVIEW,
+                        DocumentVersionStatus.PUBLISHED,
+                    )
+                ),
+                published_version.deleted_at.is_(None),
+            )
+            .correlate(Document)
+            .scalar_subquery()
+        )
+        selected_index_exists = exists(
+            select(CourseIndex.id).where(
+                CourseIndex.course_id == self.course_id,
+                CourseIndex.version == self.index_version,
+                CourseIndex.status == CourseIndexStatus.READY,
+                CourseIndex.deleted_at.is_(None),
+            )
+        )
+        distance = Chunk.embedding.cosine_distance(query_vector).label(
+            "cosine_distance"
+        )
+        statement = (
+            select(Chunk, DocumentVersion, Document, distance)
+            .join(DocumentVersion, DocumentVersion.id == Chunk.version_id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(
+                selected_index_exists,
+                Document.course_id == self.course_id,
+                Document.status == DocumentStatus.ACTIVE,
+                Document.deleted_at.is_(None),
+                DocumentVersion.status.in_(
+                    (
+                        DocumentVersionStatus.READY_FOR_REVIEW,
+                        DocumentVersionStatus.PUBLISHED,
+                    )
+                ),
+                DocumentVersion.deleted_at.is_(None),
+                DocumentVersion.version == latest_selected_version,
+                Chunk.status == RecordStatus.ACTIVE,
+                Chunk.deleted_at.is_(None),
+                Chunk.embedding.is_not(None),
+            )
+            .order_by(distance.asc(), Chunk.id.asc())
+            .limit(top_k)
+        )
+        async with self.session_factory() as session:
+            rows = (await session.execute(statement)).all()
+
+        candidates: list[DenseCandidate] = []
+        for chunk, version, document, raw_distance in rows:
+            similarity = 1.0 - float(raw_distance)
+            if not math.isfinite(similarity):
+                continue
+            candidates.append(
+                DenseCandidate(
+                    chunk_id=str(chunk.id),
+                    score=similarity,
+                    content=chunk.content,
+                    metadata={
+                        "normalized_score": max(
+                            0.0, min(1.0, (similarity + 1.0) / 2.0)
+                        ),
+                        "document": document.logical_name,
+                        "document_version": str(version.version),
+                        "section": (
+                            " / ".join(chunk.section_path)
+                            if chunk.section_path
+                            else None
+                        ),
+                        "page": chunk.page,
+                    },
+                )
+            )
+        return candidates
+
+
+class DefaultEvaluationProviderFactory:
+    def build(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        settings: Settings,
+        dialect_name: str,
+        course_index: CourseIndex,
+    ) -> EvaluationProviders:
+        embedding = BGEM3EmbeddingAdapter(
+            settings.embedding_model,
+            allow_download=settings.model_allow_download,
+            cache_folder=settings.hf_home,
+        )
+        if course_index.status == CourseIndexStatus.ACTIVE:
+            dense: Any = PostgresPgVectorDenseRetriever(
+                session_factory,
+                embedding,
+                dialect_name=dialect_name,
+            )
+        else:
+            dense = _ReadyIndexPgVectorDenseRetriever(
+                session_factory,
+                embedding,
+                course_id=course_index.course_id,
+                index_version=course_index.version,
+                dialect_name=dialect_name,
+            )
+
+        lexical = LexicalIndexManager(settings.index_root)
+        expected_artifact = lexical.store.artifact_path(
+            str(course_index.course_id), str(course_index.version)
+        )
+        if not course_index.lexical_path:
+            raise EvaluationRunnerError(
+                "EVAL_LEXICAL_ARTIFACT_MISSING",
+                "The selected course index has no lexical artifact path",
+            )
+        if Path(course_index.lexical_path).resolve() != expected_artifact.resolve():
+            raise EvaluationRunnerError(
+                "EVAL_LEXICAL_ARTIFACT_MISMATCH",
+                "The selected course index points outside its versioned lexical artifact",
+                details={
+                    "recorded_path": course_index.lexical_path,
+                    "expected_path": str(expected_artifact),
+                },
+            )
+        if not expected_artifact.is_file():
+            raise EvaluationRunnerError(
+                "EVAL_LEXICAL_ARTIFACT_MISSING",
+                "The selected course index lexical artifact does not exist",
+                details={"path": str(expected_artifact)},
+            )
+
+        reranker = BGERerankerAdapter(
+            settings.reranker_model,
+            allow_download=settings.model_allow_download,
+            cache_folder=settings.hf_home,
+        )
+        return EvaluationProviders(
+            dense=dense,
+            lexical=lexical,
+            reranker=reranker,
+            model_versions={
+                "embedding": settings.embedding_model,
+                "reranker": settings.reranker_model,
+                "lexical": "coursepilot-lightweight-bm25/artifact-v1",
+                "graph": "postgres-approved-review-records/v1",
+                "personalization": "beta-bernoulli-mastery/v1",
+            },
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalizationContext:
+    student_id: uuid.UUID
+    target_concept_ids: tuple[uuid.UUID, ...]
+    concepts: Mapping[uuid.UUID, ConceptCandidate]
+    relations: tuple[RelationCandidate, ...]
+    masteries: Mapping[uuid.UUID, float]
+
+
+@dataclass(frozen=True, slots=True)
+class ThreeBaselineResult:
+    report_path: Path
+    report: Mapping[str, Any]
+    eval_run_ids: Mapping[str, uuid.UUID]
+
+
+def _case_error(case: EvalCase, code: str, message: str) -> EvaluationRunnerError:
+    return EvaluationRunnerError(
+        code,
+        message,
+        details={"case_key": case.case_key},
+    )
+
+
+def _case_query(case: EvalCase) -> str:
+    query = case.input.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise _case_error(
+            case,
+            "EVAL_CASE_QUERY_MISSING",
+            "Every retrieval case must provide input.query",
+        )
+    return query.strip()
+
+
+def _uuid_list(value: object, *, case: EvalCase, field: str) -> tuple[uuid.UUID, ...]:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes, bytearray))
+        or not value
+    ):
+        raise _case_error(
+            case,
+            "EVAL_PERSONALIZATION_CONTEXT_MISSING",
+            f"kg_personalized requires a non-empty input.{field}",
+        )
+    result: list[uuid.UUID] = []
+    for item in value:
+        try:
+            parsed = uuid.UUID(str(item))
+        except (TypeError, ValueError) as exc:
+            raise _case_error(
+                case,
+                "EVAL_PERSONALIZATION_CONTEXT_INVALID",
+                f"input.{field} must contain UUIDs",
+            ) from exc
+        if parsed not in result:
+            result.append(parsed)
+    return tuple(result)
+
+
+async def _personalization_context(
+    session: AsyncSession,
+    *,
+    case: EvalCase,
+    course_id: uuid.UUID,
+    course_index: CourseIndex,
+) -> PersonalizationContext:
+    raw_student_id = case.input.get("student_id")
+    try:
+        student_id = uuid.UUID(str(raw_student_id))
+    except (TypeError, ValueError) as exc:
+        raise _case_error(
+            case,
+            "EVAL_PERSONALIZATION_CONTEXT_MISSING",
+            "kg_personalized requires input.student_id",
+        ) from exc
+    target_ids = _uuid_list(
+        case.input.get("target_concept_ids"),
+        case=case,
+        field="target_concept_ids",
+    )
+
+    enrollment = await session.scalar(
+        select(Enrollment.id).where(
+            Enrollment.course_id == course_id,
+            Enrollment.student_id == student_id,
+            Enrollment.status == EnrollmentStatus.ACTIVE,
+        )
+    )
+    if enrollment is None:
+        raise _case_error(
+            case,
+            "EVAL_PERSONALIZATION_STUDENT_NOT_ENROLLED",
+            "input.student_id is not actively enrolled in the dataset course",
+        )
+
+    concepts = list(
+        (
+            await session.scalars(
+                select(ConceptCandidate).where(
+                    ConceptCandidate.course_id == course_id,
+                    ConceptCandidate.index_id == course_index.id,
+                    ConceptCandidate.status == ReviewStatus.APPROVED,
+                    ConceptCandidate.deleted_at.is_(None),
+                )
+            )
+        ).all()
+    )
+    concept_map = {concept.id: concept for concept in concepts}
+    missing_targets = [str(item) for item in target_ids if item not in concept_map]
+    if missing_targets:
+        raise _case_error(
+            case,
+            "EVAL_PERSONALIZATION_TARGET_NOT_APPROVED",
+            "Every target concept must be APPROVED in the selected index",
+        )
+
+    relations = tuple(
+        relation
+        for relation in (
+            await session.scalars(
+                select(RelationCandidate).where(
+                    RelationCandidate.course_id == course_id,
+                    RelationCandidate.status == ReviewStatus.APPROVED,
+                    RelationCandidate.deleted_at.is_(None),
+                )
+            )
+        ).all()
+        if relation.from_candidate_id in concept_map
+        and relation.to_candidate_id in concept_map
+    )
+    mastery_rows = list(
+        (
+            await session.scalars(
+                select(MasteryState).where(
+                    MasteryState.course_id == course_id,
+                    MasteryState.student_id == student_id,
+                    MasteryState.concept_id.in_(tuple(concept_map)),
+                    MasteryState.status == RecordStatus.ACTIVE,
+                    MasteryState.deleted_at.is_(None),
+                )
+            )
+        ).all()
+    )
+    masteries = {row.concept_id: float(row.mastery) for row in mastery_rows}
+    missing_mastery = [str(item) for item in target_ids if item not in masteries]
+    if missing_mastery:
+        raise _case_error(
+            case,
+            "EVAL_PERSONALIZATION_MASTERY_MISSING",
+            "Every target concept needs an actual active MasteryState",
+        )
+    return PersonalizationContext(
+        student_id=student_id,
+        target_concept_ids=target_ids,
+        concepts=concept_map,
+        relations=relations,
+        masteries=masteries,
+    )
+
+
+async def _authoritative_chunk_ids(
+    session: AsyncSession,
+    *,
+    course_index: CourseIndex,
+    candidate_ids: Sequence[str],
+) -> list[str]:
+    ordered: list[uuid.UUID] = []
+    for raw_id in candidate_ids:
+        try:
+            chunk_id = uuid.UUID(str(raw_id))
+        except (TypeError, ValueError) as exc:
+            raise EvaluationRunnerError(
+                "EVAL_RETRIEVER_RETURNED_INVALID_CHUNK",
+                "A retrieval provider returned a non-UUID chunk ID",
+                details={"chunk_id": str(raw_id)},
+            ) from exc
+        if chunk_id not in ordered:
+            ordered.append(chunk_id)
+    if not ordered:
+        return []
+
+    allowed_version_statuses = (
+        (DocumentVersionStatus.PUBLISHED,)
+        if course_index.status == CourseIndexStatus.ACTIVE
+        else (
+            DocumentVersionStatus.READY_FOR_REVIEW,
+            DocumentVersionStatus.PUBLISHED,
+        )
+    )
+    published_version = aliased(DocumentVersion)
+    latest_selected_version = (
+        select(func.max(published_version.version))
+        .where(
+            published_version.document_id == Document.id,
+            published_version.status.in_(allowed_version_statuses),
+            published_version.deleted_at.is_(None),
+        )
+        .correlate(Document)
+        .scalar_subquery()
+    )
+    rows = set(
+        (
+            await session.scalars(
+                select(Chunk.id)
+                .join(DocumentVersion, DocumentVersion.id == Chunk.version_id)
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .where(
+                    Chunk.id.in_(ordered),
+                    Chunk.status == RecordStatus.ACTIVE,
+                    Chunk.deleted_at.is_(None),
+                    DocumentVersion.status.in_(allowed_version_statuses),
+                    DocumentVersion.deleted_at.is_(None),
+                    DocumentVersion.version == latest_selected_version,
+                    Document.course_id == course_index.course_id,
+                    Document.status == DocumentStatus.ACTIVE,
+                    Document.deleted_at.is_(None),
+                )
+            )
+        ).all()
+    )
+    out_of_scope = [str(item) for item in ordered if item not in rows]
+    if out_of_scope:
+        raise EvaluationRunnerError(
+            "EVAL_RETRIEVER_SCOPE_VIOLATION",
+            "A retrieval provider returned chunks outside the selected course corpus",
+            details={"chunk_ids": out_of_scope},
+        )
+    return [str(item) for item in ordered]
+
+
+def _edge_factor(relation: RelationCandidate, current: uuid.UUID) -> float:
+    if relation.type == RelationType.PREREQUISITE_OF:
+        return 0.95 if relation.to_candidate_id == current else 0.60
+    if relation.type == RelationType.PART_OF:
+        return 0.75
+    if relation.type == RelationType.RELATED_TO:
+        return 0.65
+    return 0.50
+
+
+async def _personalize(
+    session: AsyncSession,
+    *,
+    course_index: CourseIndex,
+    base_ranking: Sequence[str],
+    context: PersonalizationContext,
+    final_top_k: int,
+    graph_depth: int,
+    kg_weight: float,
+) -> tuple[list[str], dict[str, Any]]:
+    influence = {concept_id: 1.0 for concept_id in context.target_concept_ids}
+    frontier: deque[tuple[uuid.UUID, int]] = deque(
+        (concept_id, 0) for concept_id in context.target_concept_ids
+    )
+    used_relations: set[uuid.UUID] = set()
+    while frontier:
+        current, depth = frontier.popleft()
+        if depth >= graph_depth:
+            continue
+        for relation in context.relations:
+            if relation.from_candidate_id == current:
+                neighbor = relation.to_candidate_id
+            elif relation.to_candidate_id == current:
+                neighbor = relation.from_candidate_id
+            else:
+                continue
+            used_relations.add(relation.id)
+            propagated = influence[current] * _edge_factor(relation, current) * 0.8
+            if propagated > influence.get(neighbor, 0.0):
+                influence[neighbor] = propagated
+                frontier.append((neighbor, depth + 1))
+
+    chunk_boosts: dict[str, float] = {}
+    concept_scores: dict[uuid.UUID, float] = {}
+    for concept_id, graph_score in influence.items():
+        mastery = context.masteries.get(concept_id)
+        if mastery is None:
+            continue
+        score = graph_score * (1.0 - mastery)
+        concept_scores[concept_id] = score
+        chunk_id = str(context.concepts[concept_id].source_chunk_id)
+        chunk_boosts[chunk_id] = max(chunk_boosts.get(chunk_id, 0.0), score)
+    for relation in context.relations:
+        if relation.id not in used_relations:
+            continue
+        endpoint_score = max(
+            concept_scores.get(relation.from_candidate_id, 0.0),
+            concept_scores.get(relation.to_candidate_id, 0.0),
+        )
+        if endpoint_score > 0:
+            chunk_id = str(relation.source_chunk_id)
+            chunk_boosts[chunk_id] = max(
+                chunk_boosts.get(chunk_id, 0.0), endpoint_score * 0.8
+            )
+
+    augmented = list(base_ranking)
+    augmented.extend(item for item in chunk_boosts if item not in augmented)
+    augmented = await _authoritative_chunk_ids(
+        session,
+        course_index=course_index,
+        candidate_ids=augmented,
+    )
+    base_rank = {chunk_id: rank for rank, chunk_id in enumerate(base_ranking, start=1)}
+    scored = sorted(
+        augmented,
+        key=lambda chunk_id: (
+            -(
+                (1.0 / base_rank[chunk_id] if chunk_id in base_rank else 0.0)
+                + kg_weight * chunk_boosts.get(chunk_id, 0.0)
+            ),
+            base_rank.get(chunk_id, len(base_rank) + 1),
+            chunk_id,
+        ),
+    )[:final_top_k]
+    trace = {
+        "student_id": str(context.student_id),
+        "target_concept_ids": [str(item) for item in context.target_concept_ids],
+        "approved_concept_ids_used": [
+            str(item) for item in sorted(concept_scores, key=str)
+        ],
+        "approved_relation_ids_used": [
+            str(item) for item in sorted(used_relations, key=str)
+        ],
+        "mastery_states_used": {
+            str(item): context.masteries[item]
+            for item in sorted(concept_scores, key=str)
+        },
+        "chunk_boosts": dict(sorted(chunk_boosts.items())),
+        "base_ranked_chunk_ids": list(base_ranking),
+        "ranked_chunk_ids": scored,
+    }
+    return scored, trace
+
+
+def _validate_trace(mode: str, trace: Mapping[str, Any]) -> None:
+    stages = trace["stages"]
+    if stages["dense"]["status"] != "success":
+        raise EvaluationRunnerError(
+            "EVAL_DENSE_ROUTE_FAILED",
+            f"{mode} did not execute a successful dense route",
+            details={"trace": trace},
+        )
+    if mode != "dense_only" and stages["lexical"]["status"] != "success":
+        raise EvaluationRunnerError(
+            "EVAL_LEXICAL_ROUTE_FAILED",
+            f"{mode} did not execute a successful lexical route",
+            details={"trace": trace},
+        )
+    if mode != "dense_only" and stages["reranker"]["status"] not in {
+        "success",
+        "skipped_empty",
+    }:
+        raise EvaluationRunnerError(
+            "EVAL_RERANKER_FAILED",
+            f"{mode} did not execute its configured reranker",
+            details={"trace": trace},
+        )
+
+
+def _hardware_provenance() -> dict[str, Any]:
+    return {
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "processor": platform.processor() or None,
+        "python": platform.python_version(),
+        "logical_cpu_count": os.cpu_count(),
+        "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES"),
+    }
+
+
+def _git_provenance() -> tuple[str, bool]:
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise EvaluationRunnerError(
+            "EVAL_GIT_PROVENANCE_UNAVAILABLE",
+            "Could not determine the Git revision for this evaluation",
+        ) from exc
+    return commit, dirty
+
+
+def _report_version(
+    dataset: EvalDataset, index_version: int, generated_at: datetime
+) -> str:
+    timestamp = generated_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"retrieval-ds-v{dataset.version}-index-v{index_version}-{timestamp}"
+
+
+def _write_report(
+    output_dir: str | Path, report_version: str, report: Mapping[str, Any]
+) -> Path:
+    if (
+        not report_version
+        or report_version in {".", ".."}
+        or "/" in report_version
+        or "\\" in report_version
+        or "\x00" in report_version
+    ):
+        raise EvaluationRunnerError(
+            "EVAL_REPORT_VERSION_INVALID",
+            "report_version must be a safe non-empty filename component",
+        )
+    directory = Path(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"{report_version}.json"
+    try:
+        with target.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(
+                report,
+                stream,
+                allow_nan=False,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            stream.write("\n")
+    except FileExistsError as exc:
+        raise EvaluationRunnerError(
+            "EVAL_REPORT_ALREADY_EXISTS",
+            "The versioned evaluation report already exists",
+            details={"path": str(target)},
+        ) from exc
+    return target
+
+
+async def run_three_baselines(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    dataset_id: uuid.UUID,
+    index_version: int,
+    output_dir: str | Path,
+    provider_factory: EvaluationProviderFactory | None = None,
+    git_commit: str | None = None,
+    git_dirty: bool | None = None,
+    report_version: str | None = None,
+    prompt_version: str = "no-generation/retrieval-eval-v1",
+    generated_at: datetime | None = None,
+    hardware: Mapping[str, Any] | None = None,
+    route_top_k: int = 20,
+    fusion_top_k: int = 20,
+    final_top_k: int = 10,
+    rrf_k: int = 60,
+    reranker_timeout_seconds: float = 15.0,
+    graph_depth: int = 2,
+    kg_weight: float = 1.0,
+) -> ThreeBaselineResult:
+    if index_version < 1:
+        raise ValueError("index_version must be positive")
+    if graph_depth < 0 or graph_depth > 4:
+        raise ValueError("graph_depth must be between 0 and 4")
+    if not math.isfinite(kg_weight) or kg_weight < 0:
+        raise ValueError("kg_weight must be finite and non-negative")
+    generated = (generated_at or datetime.now(UTC)).astimezone(UTC)
+    if git_commit is None:
+        git_commit, discovered_dirty = _git_provenance()
+        git_dirty = discovered_dirty if git_dirty is None else git_dirty
+    if not git_commit.strip():
+        raise ValueError("git_commit must not be blank")
+    hardware_details = dict(hardware or _hardware_provenance())
+    retrieval_parameters = {
+        "route_top_k": route_top_k,
+        "fusion_top_k": fusion_top_k,
+        "final_top_k": final_top_k,
+        "rrf_k": rrf_k,
+        "reranker_timeout_seconds": reranker_timeout_seconds,
+        "graph_depth": graph_depth,
+        "kg_weight": kg_weight,
+    }
+    retrieval_config = HybridRetrievalConfig(
+        route_top_k=route_top_k,
+        fusion_top_k=fusion_top_k,
+        final_top_k=final_top_k,
+        rrf_k=rrf_k,
+        reranker_timeout_seconds=reranker_timeout_seconds,
+    )
+
+    async with session_factory() as session:
+        dataset = await session.scalar(
+            select(EvalDataset).where(
+                EvalDataset.id == dataset_id,
+                EvalDataset.deleted_at.is_(None),
+            )
+        )
+        if dataset is None:
+            raise EvaluationRunnerError(
+                "EVAL_DATASET_NOT_FOUND", "Evaluation dataset not found"
+            )
+        if dataset.type != EvalDatasetType.RETRIEVAL:
+            raise EvaluationRunnerError(
+                "EVAL_DATASET_TYPE_INVALID",
+                "The three-baseline runner only accepts RETRIEVAL datasets",
+            )
+        if dataset.status != EvalDatasetStatus.FROZEN or dataset.frozen_at is None:
+            raise EvaluationRunnerError(
+                "EVAL_DATASET_NOT_FROZEN",
+                "The three-baseline runner requires a FROZEN dataset",
+            )
+        course = await session.scalar(
+            select(Course).where(Course.id == dataset.course_id)
+        )
+        teacher = await session.scalar(
+            select(User).where(User.id == course.owner_id if course else False)
+        )
+        if course is None or teacher is None or teacher.role != UserRole.TEACHER:
+            raise EvaluationRunnerError(
+                "EVAL_COURSE_OWNER_INVALID",
+                "The dataset course has no valid teacher owner",
+            )
+        course_index = await session.scalar(
+            select(CourseIndex).where(
+                CourseIndex.course_id == dataset.course_id,
+                CourseIndex.version == index_version,
+                CourseIndex.deleted_at.is_(None),
+            )
+        )
+        if course_index is None:
+            raise EvaluationRunnerError(
+                "EVAL_INDEX_NOT_FOUND", "The selected course index was not found"
+            )
+        if course_index.status not in {
+            CourseIndexStatus.READY,
+            CourseIndexStatus.ACTIVE,
+        }:
+            raise EvaluationRunnerError(
+                "EVAL_INDEX_NOT_READY",
+                "The selected course index must be READY or ACTIVE",
+            )
+        if course_index.dense_status != IndexComponentStatus.READY:
+            raise EvaluationRunnerError(
+                "EVAL_DENSE_INDEX_NOT_READY",
+                "All three baselines require a READY dense index",
+            )
+        if course_index.lexical_status != IndexComponentStatus.READY:
+            raise EvaluationRunnerError(
+                "EVAL_LEXICAL_INDEX_NOT_READY",
+                "Hybrid baselines require a READY lexical index",
+            )
+        cases = await _active_cases(session, dataset.id)
+        if not cases:
+            raise EvaluationRunnerError(
+                "EVAL_DATASET_EMPTY", "The frozen dataset has no active cases"
+            )
+        for case in cases:
+            _case_query(case)
+
+        # Validate every personalized case before persisting any baseline run.
+        personalization = {
+            case.case_key: await _personalization_context(
+                session,
+                case=case,
+                course_id=dataset.course_id,
+                course_index=course_index,
+            )
+            for case in cases
+        }
+        factory = provider_factory or DefaultEvaluationProviderFactory()
+        engine = session.get_bind()
+        providers = factory.build(
+            session_factory=session_factory,
+            settings=settings,
+            dialect_name=engine.dialect.name,
+            course_index=course_index,
+        )
+        if not providers.model_versions:
+            raise EvaluationRunnerError(
+                "EVAL_MODEL_PROVENANCE_MISSING",
+                "The provider factory must report model versions",
+            )
+
+        snapshot = _domain_snapshot(dataset, cases, frozen_at=dataset.frozen_at)
+        selected_report_version = report_version or _report_version(
+            dataset, index_version, generated
+        )
+        baselines: list[dict[str, Any]] = []
+        run_ids: dict[str, uuid.UUID] = {}
+        for mode in BASELINE_MODES:
+            retriever = HybridRetriever(
+                dense=providers.dense,
+                lexical=providers.lexical if mode != "dense_only" else None,
+                reranker=providers.reranker if mode != "dense_only" else None,
+                config=retrieval_config,
+            )
+            case_results: dict[str, Any] = {}
+            started = time.perf_counter()
+            for case in cases:
+                query = _case_query(case)
+                result = await retriever.retrieve(
+                    course_id=str(dataset.course_id),
+                    index_version=str(index_version),
+                    query=query,
+                    top_k=final_top_k,
+                    trace_id=str(uuid.uuid4()),
+                )
+                trace = result.trace.to_dict()
+                _validate_trace(mode, trace)
+                ranked = await _authoritative_chunk_ids(
+                    session,
+                    course_index=course_index,
+                    candidate_ids=[
+                        candidate.chunk_id for candidate in result.candidates
+                    ],
+                )
+                output: dict[str, Any] = {
+                    "ranked_chunk_ids": ranked,
+                    "retrieval_trace": trace,
+                }
+                if mode == "kg_personalized":
+                    ranked, personalization_trace = await _personalize(
+                        session,
+                        course_index=course_index,
+                        base_ranking=ranked,
+                        context=personalization[case.case_key],
+                        final_top_k=final_top_k,
+                        graph_depth=graph_depth,
+                        kg_weight=kg_weight,
+                    )
+                    output["ranked_chunk_ids"] = ranked
+                    output["personalization_trace"] = personalization_trace
+                case_results[case.case_key] = output
+
+            duration_ms = (time.perf_counter() - started) * 1000
+            raw_config = {
+                "git_commit": git_commit,
+                "dataset_version": dataset.version,
+                "index_version": index_version,
+                "model_versions": dict(providers.model_versions),
+                "prompt_version": prompt_version,
+                "retrieval_parameters": retrieval_parameters,
+                "hardware": hardware_details,
+                "experiment": mode,
+                "report_version": selected_report_version,
+                "git_dirty": git_dirty,
+                "duration_ms": round(duration_ms, 3),
+            }
+            run = await create_run(
+                session,
+                dataset_id=dataset.id,
+                teacher=teacher,
+                raw_config=raw_config,
+                case_results=case_results,
+            )
+            run_ids[mode] = run.id
+            baselines.append(
+                {
+                    "mode": mode,
+                    "eval_run_id": str(run.id),
+                    "trace_id": str(run.trace_id),
+                    "duration_ms": round(duration_ms, 3),
+                    "metrics": run.metrics,
+                    "case_results": case_results,
+                }
+            )
+
+        report: dict[str, Any] = {
+            "schema_version": THREE_BASELINE_REPORT_SCHEMA_VERSION,
+            "report_version": selected_report_version,
+            "generated_at": generated.isoformat().replace("+00:00", "Z"),
+            "dataset": {
+                "id": str(dataset.id),
+                "type": dataset.type.value,
+                "version": dataset.version,
+                "frozen_at": dataset.frozen_at.isoformat().replace("+00:00", "Z"),
+                "content_sha256": snapshot.content_sha256,
+                "case_count": len(cases),
+            },
+            "course_index": {
+                "id": str(course_index.id),
+                "course_id": str(course_index.course_id),
+                "version": course_index.version,
+                "status": course_index.status.value,
+                "dense_status": course_index.dense_status.value,
+                "lexical_status": course_index.lexical_status.value,
+            },
+            "provenance": {
+                "git_commit": git_commit,
+                "git_dirty": git_dirty,
+                "model_versions": dict(providers.model_versions),
+                "prompt_version": prompt_version,
+                "retrieval_parameters": retrieval_parameters,
+                "hardware": hardware_details,
+            },
+            "baselines": baselines,
+        }
+        report_path = _write_report(output_dir, selected_report_version, report)
+        return ThreeBaselineResult(report_path, report, run_ids)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run dense_only, hybrid_rerank, and kg_personalized against one "
+            "frozen CoursePilot retrieval dataset."
+        )
+    )
+    parser.add_argument("--dataset-id", required=True, type=uuid.UUID)
+    parser.add_argument("--index-version", required=True, type=int)
+    parser.add_argument("--output-dir", default="evaluation-reports")
+    parser.add_argument("--report-version")
+    parser.add_argument("--git-commit")
+    parser.add_argument("--prompt-version", default="no-generation/retrieval-eval-v1")
+    parser.add_argument("--route-top-k", type=int, default=20)
+    parser.add_argument("--fusion-top-k", type=int, default=20)
+    parser.add_argument("--final-top-k", type=int, default=10)
+    parser.add_argument("--rrf-k", type=int, default=60)
+    parser.add_argument("--reranker-timeout-seconds", type=float, default=15.0)
+    parser.add_argument("--graph-depth", type=int, default=2)
+    parser.add_argument("--kg-weight", type=float, default=1.0)
+    return parser
+
+
+async def _async_main(args: argparse.Namespace) -> ThreeBaselineResult:
+    settings = get_settings()
+    engine = create_engine(settings)
+    try:
+        return await run_three_baselines(
+            session_factory=create_session_factory(engine),
+            settings=settings,
+            dataset_id=args.dataset_id,
+            index_version=args.index_version,
+            output_dir=args.output_dir,
+            git_commit=args.git_commit,
+            report_version=args.report_version,
+            prompt_version=args.prompt_version,
+            route_top_k=args.route_top_k,
+            fusion_top_k=args.fusion_top_k,
+            final_top_k=args.final_top_k,
+            rrf_k=args.rrf_k,
+            reranker_timeout_seconds=args.reranker_timeout_seconds,
+            graph_depth=args.graph_depth,
+            kg_weight=args.kg_weight,
+        )
+    finally:
+        await engine.dispose()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        result = asyncio.run(_async_main(args))
+    except EvaluationRunnerError as exc:
+        payload = {"error": {"code": exc.code, "message": str(exc)}}
+        if exc.details:
+            payload["error"]["details"] = exc.details
+        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            {
+                "report_path": str(result.report_path),
+                "eval_run_ids": {
+                    mode: str(run_id) for mode, run_id in result.eval_run_ids.items()
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

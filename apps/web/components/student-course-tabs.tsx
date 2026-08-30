@@ -16,15 +16,26 @@ import {
 } from "@/components/ui";
 import { ApiError, apiRequest, jsonBody, streamChatMessage } from "@/lib/api";
 import type {
+  ApprovedGraph,
   Citation,
   Course,
+  LearningHistory,
   LearningPath,
   MasteryState,
+  MasteryUpdate,
   QuizAttempt,
+  QuizHistoryAttempt,
   QuizItem,
 } from "@/lib/types";
 
-type StudentTab = "overview" | "chat" | "quiz" | "mastery" | "path";
+type StudentTab =
+  | "overview"
+  | "chat"
+  | "graph"
+  | "quiz"
+  | "mastery"
+  | "path"
+  | "history";
 
 export function StudentCourseTabs({
   course,
@@ -34,9 +45,11 @@ export function StudentCourseTabs({
   activeTab: StudentTab;
 }) {
   if (activeTab === "chat") return <StudentChat course={course} />;
+  if (activeTab === "graph") return <StudentGraph course={course} />;
   if (activeTab === "quiz") return <StudentQuiz course={course} />;
   if (activeTab === "mastery") return <StudentMastery course={course} />;
   if (activeTab === "path") return <StudentLearningPath course={course} />;
+  if (activeTab === "history") return <StudentHistory course={course} />;
   return <StudentOverview course={course} />;
 }
 
@@ -352,9 +365,15 @@ function normalizeQuizItem(data: QuizItem | QuizItem[] | { items?: QuizItem[] })
 
 function optionEntries(options: QuizItem["options"]) {
   if (Array.isArray(options)) {
-    return options.map((option, index) => [String.fromCharCode(65 + index), option] as const);
+    return options.map((option, index) => ({
+      answer: option,
+      label: String.fromCharCode(65 + index),
+    }));
   }
-  return Object.entries(options);
+  return Object.entries(options).map(([label, option]) => ({
+    answer: option,
+    label,
+  }));
 }
 
 function StudentQuiz({ course }: { course: Course }) {
@@ -441,26 +460,26 @@ function StudentQuiz({ course }: { course: Course }) {
               {item.question}
             </legend>
             <div className="mt-5 space-y-3">
-              {optionEntries(item.options).map(([value, label]) => (
+              {optionEntries(item.options).map(({ answer: option, label }) => (
                 <label
                   className={`flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition ${
-                    answer === value
+                    answer === option
                       ? "border-[#2f6961] bg-[#e9f1ed]"
                       : "border-[#172523]/11 bg-white hover:border-[#2f6961]/30"
                   }`}
-                  key={value}
+                  key={`${label}:${option}`}
                 >
                   <input
-                    checked={answer === value}
+                    checked={answer === option}
                     className="mt-1 accent-[#2f6961]"
                     name={`quiz-${item.id}`}
-                    onChange={() => setAnswer(value)}
+                    onChange={() => setAnswer(option)}
                     type="radio"
-                    value={value}
+                    value={option}
                   />
                   <span className="text-sm leading-6">
-                    <strong className="mr-2">{value}.</strong>
-                    {label}
+                    <strong className="mr-2">{label}.</strong>
+                    {option}
                   </span>
                 </label>
               ))}
@@ -491,6 +510,326 @@ function StudentQuiz({ course }: { course: Course }) {
         <EmptyState
           description="当前课程暂时没有可用于诊断的教师审核题目。"
           title="没有可用题目"
+        />
+      )}
+    </div>
+  );
+}
+
+const relationLabels: Record<string, string> = {
+  PREREQUISITE_OF: "是前置知识",
+  RELATED_TO: "相关",
+  PART_OF: "属于",
+  CONTRASTS_WITH: "对比",
+};
+
+function StudentGraph({ course }: { course: Course }) {
+  const [graph, setGraph] = useState<ApprovedGraph | null>(null);
+  const [mastery, setMastery] = useState<MasteryState[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
+
+  const loadGraph = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [approvedGraph, masteryData] = await Promise.all([
+        apiRequest<ApprovedGraph>(`/courses/${course.id}/graph`),
+        apiRequest<
+          MasteryState[] | { items?: MasteryState[]; mastery?: MasteryState[] }
+        >(`/courses/${course.id}/mastery`),
+      ]);
+      setGraph(approvedGraph);
+      setMastery(normalizeMastery(masteryData));
+    } catch (nextError) {
+      setError(nextError);
+      setGraph(null);
+      setMastery([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [course.id]);
+
+  useEffect(() => {
+    // Both resources enforce the same active-enrollment boundary server-side.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadGraph();
+  }, [loadGraph]);
+
+  const masteryByConcept = useMemo(
+    () => new Map(mastery.map((state) => [state.concept_id, state])),
+    [mastery],
+  );
+  const conceptNames = useMemo(
+    () => new Map((graph?.concepts ?? []).map((concept) => [concept.id, concept.name])),
+    [graph],
+  );
+
+  return (
+    <div className="space-y-6">
+      <SectionHeading
+        description="这里只展示教师已审核的知识点与关系；掌握度覆盖层只读取你自己的有效测验记录。"
+        eyebrow="Approved knowledge graph"
+        title="知识图谱"
+      />
+      <ErrorNotice error={error} onRetry={() => void loadGraph()} />
+      {loading ? (
+        <div className="grid min-h-72 place-items-center rounded-2xl border border-[#172523]/10 bg-white/45 text-sm text-[#687370]">
+          <Spinner label="正在读取审核图谱" />
+        </div>
+      ) : graph?.concepts.length ? (
+        <div className="space-y-6">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#172523]/10 bg-[#f8f3e8] px-4 py-3 text-xs text-[#66716e]">
+            <span>
+              {graph.concepts.length} 个审核知识点 · {graph.relations.length} 条审核关系
+            </span>
+            <span className="font-mono">
+              {graph.published_index
+                ? `课程索引 v${graph.published_index.version}`
+                : "尚无已发布索引"}
+            </span>
+          </div>
+
+          <section>
+            <h3 className="mb-3 text-sm font-semibold text-[#334643]">知识点与个人掌握度</h3>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {graph.concepts.map((concept) => {
+                const state = masteryByConcept.get(concept.id);
+                const percentage = state ? Math.round(state.mastery * 100) : null;
+                return (
+                  <article
+                    className="rounded-[18px] border border-[#172523]/10 bg-[#fbfaf6]/86 p-5"
+                    key={concept.id}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <h4 className="font-semibold tracking-[-0.015em]">{concept.name}</h4>
+                      <span
+                        className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                          percentage === null
+                            ? "bg-[#eceae3] text-[#747d7a]"
+                            : percentage >= 60
+                              ? "bg-[#e5f0eb] text-[#2f6961]"
+                              : "bg-[#fff0e4] text-[#9b6327]"
+                        }`}
+                      >
+                        {percentage === null ? "尚未测评" : `掌握 ${percentage}%`}
+                      </span>
+                    </div>
+                    <p className="mt-3 text-sm leading-6 text-[#66716e]">
+                      {concept.description || "教师尚未补充知识点说明。"}
+                    </p>
+                    {state ? (
+                      <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-[#dfe5e1]">
+                        <span
+                          aria-label={`掌握度 ${percentage}%`}
+                          className="block h-full rounded-full bg-[#2f6961]"
+                          style={{ width: `${percentage}%` }}
+                        />
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+
+          <section>
+            <h3 className="mb-3 text-sm font-semibold text-[#334643]">审核关系</h3>
+            {graph.relations.length ? (
+              <div className="grid gap-2 lg:grid-cols-2">
+                {graph.relations.map((relation) => (
+                  <article
+                    className="flex items-center gap-3 rounded-xl border border-[#172523]/10 bg-white/65 px-4 py-3 text-sm"
+                    key={relation.id}
+                  >
+                    <strong className="min-w-0 flex-1 truncate">
+                      {conceptNames.get(relation.from_concept_id) ?? relation.from_concept_id}
+                    </strong>
+                    <span className="shrink-0 rounded-md bg-[#e7efeb] px-2 py-1 text-[11px] font-semibold text-[#41635e]">
+                      {relationLabels[relation.type] ?? relation.type}
+                    </span>
+                    <strong className="min-w-0 flex-1 truncate text-right">
+                      {conceptNames.get(relation.to_concept_id) ?? relation.to_concept_id}
+                    </strong>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                description="教师已经审核了知识点，但暂时还没有发布知识关系。"
+                title="暂无审核关系"
+              />
+            )}
+          </section>
+        </div>
+      ) : (
+        <EmptyState
+          description="教师审核并发布知识点后，这里才会显示课程图谱；候选内容不会提前暴露。"
+          title="暂无已审核知识图谱"
+        />
+      )}
+    </div>
+  );
+}
+
+type StudentHistoryEvent =
+  | {
+      kind: "CHAT_SESSION";
+      occurredAt: string;
+      session: LearningHistory["chat_sessions"][number];
+    }
+  | {
+      kind: "QUIZ_ATTEMPT";
+      occurredAt: string;
+      attempt: QuizHistoryAttempt;
+      mastery?: MasteryUpdate;
+    };
+
+function StudentHistory({ course }: { course: Course }) {
+  const [history, setHistory] = useState<LearningHistory | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
+
+  const loadHistory = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setHistory(
+        await apiRequest<LearningHistory>(`/courses/${course.id}/learning-history`),
+      );
+    } catch (nextError) {
+      setError(nextError);
+      setHistory(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [course.id]);
+
+  useEffect(() => {
+    // History is derived from this student's stored sessions and quiz attempts.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadHistory();
+  }, [loadHistory]);
+
+  const events = useMemo<StudentHistoryEvent[]>(() => {
+    if (!history) return [];
+    const masteryByAttempt = new Map(
+      history.mastery_updates.map((update) => [update.attempt_id, update]),
+    );
+    return [
+      ...history.chat_sessions.map(
+        (session): StudentHistoryEvent => ({
+          kind: "CHAT_SESSION",
+          occurredAt: session.last_message_at ?? session.created_at,
+          session,
+        }),
+      ),
+      ...history.quiz_attempts.map(
+        (attempt): StudentHistoryEvent => ({
+          kind: "QUIZ_ATTEMPT",
+          occurredAt: attempt.graded_at ?? attempt.submitted_at,
+          attempt,
+          mastery: masteryByAttempt.get(attempt.id),
+        }),
+      ),
+    ].sort(
+      (left, right) =>
+        new Date(right.occurredAt).getTime() - new Date(left.occurredAt).getTime(),
+    );
+  }, [history]);
+
+  return (
+    <div className="space-y-6">
+      <SectionHeading
+        description="按时间汇总你的课程会话、测验结果与可审计的掌握度变化，不展示其他学生记录。"
+        eyebrow="Personal learning record"
+        title="学习历史"
+      />
+      <ErrorNotice error={error} onRetry={() => void loadHistory()} />
+      {loading ? (
+        <div className="grid min-h-72 place-items-center rounded-2xl border border-[#172523]/10 bg-white/45 text-sm text-[#687370]">
+          <Spinner label="正在读取学习历史" />
+        </div>
+      ) : events.length ? (
+        <div className="mx-auto max-w-4xl space-y-3">
+          {events.map((event) =>
+            event.kind === "CHAT_SESSION" ? (
+              <article
+                className="rounded-[18px] border border-[#172523]/10 bg-[#fbfaf6]/86 p-5"
+                key={`chat-${event.session.id}`}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold text-[#2f6961]">课程会话</p>
+                    <h3 className="mt-1 font-semibold">
+                      {event.session.title ||
+                        event.session.first_user_message_preview ||
+                        "未命名会话"}
+                    </h3>
+                  </div>
+                  <time className="text-xs text-[#7a8582]">
+                    {formatDate(event.occurredAt)}
+                  </time>
+                </div>
+                <p className="mt-3 text-sm leading-6 text-[#65716e]">
+                  {event.session.latest_message_preview || "该会话还没有消息。"}
+                </p>
+                <p className="mt-3 text-xs text-[#7a8582]">
+                  共 {event.session.message_count} 条消息 · 课程索引 v
+                  {event.session.index_version}
+                </p>
+              </article>
+            ) : (
+              <article
+                className="rounded-[18px] border border-[#172523]/10 bg-white/72 p-5"
+                key={`quiz-${event.attempt.id}`}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                        event.attempt.correct
+                          ? "bg-[#e5f0eb] text-[#2f6961]"
+                          : "bg-[#fff0e9] text-[#9a493b]"
+                      }`}
+                    >
+                      {event.attempt.correct ? "回答正确" : "回答错误"}
+                    </span>
+                    <span className="text-xs text-[#727d7a]">
+                      {event.attempt.concept_name}
+                    </span>
+                  </div>
+                  <time className="text-xs text-[#7a8582]">
+                    {formatDate(event.occurredAt)}
+                  </time>
+                </div>
+                <h3 className="mt-3 text-sm font-semibold leading-6">
+                  {event.attempt.question}
+                </h3>
+                <p className="mt-2 text-sm text-[#65716e]">
+                  你的答案：{event.attempt.answer}
+                </p>
+                {event.mastery ? (
+                  <p className="mt-3 rounded-lg bg-[#f1efe7] px-3 py-2 text-xs text-[#596864]">
+                    掌握度 {Math.round(event.mastery.before_mastery * 100)}% → {" "}
+                    <strong>{Math.round(event.mastery.after_mastery * 100)}%</strong>
+                    <span className="ml-2 text-[#7a8582]">
+                      （基于本次权重 {event.mastery.weight.toFixed(2)}）
+                    </span>
+                  </p>
+                ) : (
+                  <p className="mt-3 text-xs text-[#7a8582]">
+                    此记录未产生有效掌握度更新。
+                  </p>
+                )}
+              </article>
+            ),
+          )}
+        </div>
+      ) : (
+        <EmptyState
+          description="完成一次课程问答或教师审核测验后，记录会按时间显示在这里。"
+          title="还没有学习记录"
         />
       )}
     </div>

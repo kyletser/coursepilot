@@ -247,6 +247,36 @@ async def get_course(
     return success_response(request, CourseResponse.model_validate(course))
 
 
+@router.post("/{course_id}/leave")
+async def leave_course(
+    course_id: uuid.UUID,
+    request: Request,
+    session: SessionDep,
+    student: StudentUser,
+):
+    course = await session.scalar(select(Course.id).where(Course.id == course_id))
+    if course is None:
+        raise AppError(404, "COURSE_NOT_FOUND", "Course not found")
+    enrollment = await session.scalar(
+        select(Enrollment)
+        .where(
+            Enrollment.course_id == course_id,
+            Enrollment.student_id == student.id,
+        )
+        .with_for_update()
+    )
+    if enrollment is None:
+        raise AppError(
+            403,
+            "COURSE_ACCESS_DENIED",
+            "You do not have access to this course",
+        )
+    enrollment.status = EnrollmentStatus.LEFT
+    await session.commit()
+    await session.refresh(enrollment)
+    return success_response(request, EnrollmentResponse.model_validate(enrollment))
+
+
 @router.patch("/{course_id}")
 async def update_course(
     course_id: uuid.UUID,
