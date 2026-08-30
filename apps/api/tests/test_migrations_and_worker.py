@@ -52,7 +52,7 @@ def test_migrations_upgrade_and_downgrade(monkeypatch, tmp_path):
         revision = connection.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
-        assert revision == "0002_mvp_core"
+        assert revision == "0003_course_index_coverage"
 
     # SQLite reflects named enum CHECK constraints differently from PostgreSQL.
     # CI runs `alembic check` against the real PostgreSQL schema.
@@ -69,3 +69,23 @@ def test_migrations_upgrade_and_downgrade(monkeypatch, tmp_path):
 
 def test_celery_ping_task():
     assert ping.run() == {"status": "ok"}
+
+
+def test_shared_embedding_adapter_is_a_process_level_singleton(monkeypatch):
+    import app.tasks.ingestion as ingestion_module
+    from app.config import Settings
+    from app.retrieval import BGEM3EmbeddingAdapter
+
+    monkeypatch.setattr(ingestion_module, "_embedding_adapter", None)
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        database_url="sqlite+aiosqlite:///:memory:",
+        jwt_secret="coursepilot-test-secret-at-least-32-bytes",
+    )
+    adapter = ingestion_module.shared_embedding_adapter(settings)
+    assert isinstance(adapter, BGEM3EmbeddingAdapter)
+    # Lazily loaded: constructing or reusing the singleton never loads weights.
+    assert adapter.is_loaded is False
+    assert ingestion_module.shared_embedding_adapter(settings) is adapter
+    monkeypatch.setattr(ingestion_module, "_embedding_adapter", None)

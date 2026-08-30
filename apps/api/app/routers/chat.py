@@ -299,6 +299,12 @@ async def send_chat_message(
         select(CourseIndex).where(
             CourseIndex.course_id == chat_session.course_id,
             CourseIndex.version == chat_session.index_version,
+            # Historical sessions stay pinned to their creation version; the
+            # index is ARCHIVED once a newer version is published but must
+            # keep serving this session with its own corpus.
+            CourseIndex.status.in_(
+                (CourseIndexStatus.ACTIVE, CourseIndexStatus.ARCHIVED)
+            ),
             CourseIndex.deleted_at.is_(None),
         )
     )

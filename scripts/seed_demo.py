@@ -15,12 +15,81 @@ from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SAMPLES_ROOT = REPOSITORY_ROOT / "samples"
 READY_STAGES = {"READY_FOR_REVIEW", "PUBLISHED"}
 FINAL_STAGES = READY_STAGES | {"FAILED", "CANCELLED"}
 DEMO_QUIZ_MODEL = "SOURCE_GROUNDED_DETERMINISTIC_V1"
+
+# Demo-scale, human-authored evaluation annotations. These datasets are DRAFT,
+# deliberately small, and are NOT the frozen acceptance sets of spec §11.1;
+# no metric is produced or claimed by the seeding script. Retrieval cases are
+# bound to real chunk IDs read from the reviewed graph candidates so every
+# expected value traces back to the actual served corpus.
+DEMO_EVAL_CONTENT: dict[str, dict[str, Any]] = {
+    "CP-DEMO-DS": {
+        "retrieval": [
+            ("顺序表", "顺序表为什么按下标访问是常数时间，而中间插入要移动元素？"),
+            ("链表", "链表插入需要满足什么前提才是常数时间？"),
+            ("栈", "哪些实际场景可以利用栈的后进先出约束？"),
+            ("队列", "广度优先搜索为什么使用队列？"),
+            ("二叉搜索树", "二叉搜索树删除有两个孩子的节点时怎么处理？"),
+            ("图的遍历", "图的遍历为什么要维护已访问集合？"),
+            ("归并排序", "归并排序的稳定性由合并阶段的哪个选择决定？"),
+            ("快速排序", "快速排序分区完成后的不变量是什么？"),
+        ],
+        "routing": [
+            ("什么是二叉搜索树？", "TUTOR_QA"),
+            ("树的定义是什么？", "TUTOR_QA"),
+            ("比较顺序表和链表的异同", "CONCEPT_COMPARE"),
+            ("归并排序和快速排序有什么区别？", "CONCEPT_COMPARE"),
+            ("诊断一下我在图这一章缺少哪些前置知识", "DIAGNOSE"),
+            ("给我出几道关于栈的练习题", "QUIZ"),
+            ("测一测我排序这部分掌握得怎么样", "QUIZ"),
+            ("帮我安排队列的学习路径", "LEARNING_PATH"),
+            ("请为排序章节制定学习和测验计划", "LEARNING_PATH"),
+            ("线性表的常见操作包括哪些？", "TUTOR_QA"),
+        ],
+        "refusal": [
+            ("二叉搜索树删除节点时如何保持有序不变量？", True),
+            ("归并排序为什么是稳定的？", True),
+            ("红黑树旋转的具体实现代码是什么？", False),
+            ("2026 年期末考试的评分标准是什么？", False),
+        ],
+    },
+    "CP-DEMO-OS": {
+        "retrieval": [
+            ("进程状态", "就绪、运行、阻塞三种状态由什么事件触发转换？"),
+            ("上下文切换", "上下文切换为什么有额外成本？"),
+            ("时间片轮转", "时间片太长或太短分别会带来什么问题？"),
+            ("信号量", "信号量的等待操作为什么要进入受控等待？"),
+            ("死锁", "死锁发生的四个必要条件是什么？"),
+            ("分页与地址转换", "分页如何把虚拟地址转换为物理地址？"),
+            ("缺页处理", "缺页处理为什么要先区分非法访问与合法缺页？"),
+            ("页面置换", "时钟算法如何利用访问位降低维护成本？"),
+            ("文件描述符", "文件描述符和内核打开文件状态是什么关系？"),
+            ("崩溃一致性", "日志式方案如何保证崩溃后恢复到结构有效的状态？"),
+        ],
+        "routing": [
+            ("什么是线程？", "TUTOR_QA"),
+            ("页表的作用是什么？", "TUTOR_QA"),
+            ("进程和线程有什么区别？", "CONCEPT_COMPARE"),
+            ("信号量和二值信号量的用法差异是什么？", "CONCEPT_COMPARE"),
+            ("诊断我在虚拟内存部分的前置知识缺口", "DIAGNOSE"),
+            ("给我出几道死锁相关的练习题", "QUIZ"),
+            ("测试一下我并发同步掌握得如何", "QUIZ"),
+            ("帮我规划文件系统的学习路径", "LEARNING_PATH"),
+            ("为虚拟内存章节制定学习路径和测验", "LEARNING_PATH"),
+            ("调度器评价策略时要看哪些指标？", "TUTOR_QA"),
+        ],
+        "refusal": [
+            ("缺页处理的第一步是什么？", True),
+            ("时钟算法如何利用访问位？", True),
+            ("Linux 内核 CFS 调度器的具体实现细节是什么？", False),
+            ("设备驱动的中断处理代码是什么？", False),
+        ],
+    },
+}
 
 
 class SeedError(RuntimeError):
@@ -156,9 +225,7 @@ class ApiClient:
                 status,
                 str(error.get("code", "API_ERROR")),
                 str(error.get("message", "Request failed")),
-                error.get("details")
-                if isinstance(error.get("details"), dict)
-                else {},
+                error.get("details") if isinstance(error.get("details"), dict) else {},
             )
         return payload["data"]
 
@@ -319,7 +386,9 @@ def upload_sample(client: ApiClient, seed: CourseSeed) -> dict[str, Any]:
     duplicate = bool(data.get("duplicate"))
     action = "复用相同 SHA-256 的文档版本" if duplicate else "已上传新文档版本"
     version = data.get("latest_version") or {}
-    print(f"  {action}：{seed.spec.sample_path.name}（version {version.get('version')}）")
+    print(
+        f"  {action}：{seed.spec.sample_path.name}（version {version.get('version')}）"
+    )
     seed.upload = data
     return data
 
@@ -363,8 +432,13 @@ def wait_for_ingestion(
         if stage in READY_STAGES:
             if stage == "READY_FOR_REVIEW":
                 details = job.get("stage_details")
-                embedding = details.get("embedding") if isinstance(details, dict) else {}
-                if not isinstance(embedding, dict) or embedding.get("status") != "READY":
+                embedding = (
+                    details.get("embedding") if isinstance(details, dict) else {}
+                )
+                if (
+                    not isinstance(embedding, dict)
+                    or embedding.get("status") != "READY"
+                ):
                     raise SeedError(_model_unavailable_message(job))
             return job
         if stage == "CANCELLED":
@@ -424,8 +498,34 @@ def _candidate_has_evidence(candidate: dict[str, Any]) -> bool:
     )
 
 
+def _sample_title(spec: CourseSpec) -> str:
+    """Return the casefolded H1 title of the sample document, if any."""
+
+    try:
+        text = spec.sample_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    lines = text.splitlines()
+    index = 0
+    if lines and lines[0].strip() == "---":
+        index = 1
+        while index < len(lines) and lines[index].strip() not in {"---", "..."}:
+            index += 1
+        index += 1
+    for line in lines[index:]:
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip().casefold()
+        if stripped:
+            break
+    return ""
+
+
 def approve_evidence_backed_candidates(
-    client: ApiClient, course_id: str
+    client: ApiClient,
+    course_id: str,
+    *,
+    reject_concept_names: frozenset[str] = frozenset(),
 ) -> tuple[int, int]:
     queue = client.call("GET", f"/api/v1/courses/{course_id}/graph/candidates")
     if not isinstance(queue, dict):
@@ -451,20 +551,37 @@ def approve_evidence_backed_candidates(
             + ", ".join(invalid)
         )
 
+    rejected_metadata: list[str] = []
     for candidate in pending_concepts:
-        client.call(
-            "POST", f"/api/v1/graph/concepts/{candidate['id']}/approve"
-        )
+        name = str(candidate.get("name", "")).strip().casefold()
+        if name in reject_concept_names:
+            # Document titles are metadata, not knowledge points; rejecting
+            # them (instead of leaving them pending) keeps publication honest
+            # and the student-facing graph free of pseudo concepts.
+            client.call("POST", f"/api/v1/graph/concepts/{candidate['id']}/reject")
+            rejected_metadata.append(str(candidate.get("name")))
+            continue
+        client.call("POST", f"/api/v1/graph/concepts/{candidate['id']}/approve")
     for candidate in pending_relations:
+        endpoint_names = {
+            str(candidate.get(key, "")).strip().casefold()
+            for key in ("from_concept_name", "to_concept_name")
+        }
+        if endpoint_names & reject_concept_names:
+            client.call("POST", f"/api/v1/graph/relations/{candidate['id']}/reject")
+            continue
         try:
-            client.call(
-                "POST", f"/api/v1/graph/relations/{candidate['id']}/approve"
-            )
+            client.call("POST", f"/api/v1/graph/relations/{candidate['id']}/approve")
         except ApiError as exc:
             raise SeedError(
                 f"关系候选 {candidate['id']} 未能通过安全审核：{exc.code} {exc.message}。"
                 "脚本不会绕过环检测或来源校验。"
             ) from None
+    if rejected_metadata:
+        print(
+            "  已拒绝文档标题类候选（非知识点）："
+            + "、".join(dict.fromkeys(rejected_metadata))
+        )
     print(
         f"  已审核证据完整的候选：概念 {len(pending_concepts)}，关系 {len(pending_relations)}"
     )
@@ -474,9 +591,7 @@ def approve_evidence_backed_candidates(
 def publish_course(client: ApiClient, seed: CourseSeed) -> dict[str, Any]:
     course_id = str(seed.course["id"])
     try:
-        publication = client.call(
-            "POST", f"/api/v1/courses/{course_id}/graph/publish"
-        )
+        publication = client.call("POST", f"/api/v1/courses/{course_id}/graph/publish")
     except ApiError as exc:
         if exc.code == "GRAPH_INDEX_COMPONENTS_NOT_READY":
             raise SeedError(
@@ -569,6 +684,219 @@ def ensure_approved_demo_quizzes(client: ApiClient, course_id: str) -> int:
     return total
 
 
+def _concept_chunk_ids(
+    client: ApiClient,
+    course_id: str,
+    *,
+    document_version_id: str,
+) -> dict[str, str]:
+    """Map approved concepts in the current sample version to source chunks."""
+
+    queue = client.call(
+        "GET",
+        f"/api/v1/courses/{course_id}/graph/candidates?status=APPROVED",
+    )
+    if not isinstance(queue, dict) or not isinstance(queue.get("concepts"), list):
+        raise SeedError(f"课程 {course_id} 的图谱候选响应格式不正确。")
+    mapping: dict[str, str] = {}
+    for concept in queue["concepts"]:
+        if not isinstance(concept, dict):
+            continue
+        name = concept.get("name")
+        chunk_id = concept.get("source_chunk_id")
+        source = concept.get("source")
+        document = source.get("document") if isinstance(source, dict) else None
+        source_version_id = (
+            document.get("version_id") if isinstance(document, dict) else None
+        )
+        if str(source_version_id) != document_version_id:
+            continue
+        if isinstance(name, str) and isinstance(chunk_id, str) and chunk_id:
+            previous = mapping.setdefault(name, chunk_id)
+            if previous != chunk_id:
+                raise SeedError(
+                    f"课程 {course_id} 的当前文档版本中概念 {name!r} 对应多个来源 Chunk，"
+                    "无法生成唯一的检索标注。"
+                )
+    return mapping
+
+
+def _ensure_demo_dataset(
+    client: ApiClient,
+    course_id: str,
+    *,
+    dataset_name: str,
+    dataset_type: str,
+    cases: list[dict[str, Any]],
+) -> int:
+    datasets = client.call("GET", f"/api/v1/courses/{course_id}/eval-datasets")
+    if not isinstance(datasets, list):
+        raise SeedError(f"课程 {course_id} 的评测数据集列表响应格式不正确。")
+    dataset = next(
+        (
+            item
+            for item in datasets
+            if isinstance(item, dict) and item.get("name") == dataset_name
+        ),
+        None,
+    )
+    if dataset is None:
+        dataset = client.call(
+            "POST",
+            f"/api/v1/courses/{course_id}/eval-datasets",
+            json_body={
+                "name": dataset_name,
+                "description": (
+                    "种子脚本创建的演示规模人工标注数据集（DRAFT，非冻结）。"
+                    "验收用冻结数据集必须按 spec §11.1 单独构建。"
+                ),
+                "type": dataset_type,
+            },
+        )
+        if not isinstance(dataset, dict) or not isinstance(dataset.get("id"), str):
+            raise SeedError(f"创建数据集 {dataset_name} 后未收到数据集 ID。")
+    dataset_id = str(dataset["id"])
+
+    existing = client.call("GET", f"/api/v1/eval-datasets/{dataset_id}/cases")
+    if not isinstance(existing, list):
+        raise SeedError(f"数据集 {dataset_id} 的用例列表响应格式不正确。")
+    existing_by_key = {
+        item.get("case_key"): item
+        for item in existing
+        if isinstance(item, dict) and isinstance(item.get("case_key"), str)
+    }
+    changed = 0
+    for case in cases:
+        stored = existing_by_key.get(case["case_key"])
+        desired = {
+            "input": case["input"],
+            "expected": case["expected"],
+            "labels": case["labels"],
+        }
+        if stored is not None and all(
+            stored.get(field) == value for field, value in desired.items()
+        ):
+            continue
+        if str(dataset.get("status")) != "DRAFT":
+            raise SeedError(
+                f"数据集 {dataset_name} 已冻结，但演示标注与当前课程版本不一致；"
+                "请保留该冻结版本并创建新的 DRAFT 数据集。"
+            )
+        if stored is None:
+            response = client.call(
+                "POST",
+                f"/api/v1/eval-datasets/{dataset_id}/cases",
+                json_body=case,
+            )
+        else:
+            stored_id = stored.get("id")
+            if not isinstance(stored_id, str) or not stored_id:
+                raise SeedError(
+                    f"数据集 {dataset_name} 的已有用例 {case['case_key']} 缺少 ID。"
+                )
+            response = client.call(
+                "PATCH",
+                f"/api/v1/eval-cases/{stored_id}",
+                json_body=desired,
+            )
+        if not isinstance(response, dict) or not response.get("id"):
+            raise SeedError(
+                f"数据集 {dataset_name} 的用例 {case['case_key']} 写入失败。"
+            )
+        changed += 1
+    return changed
+
+
+def ensure_eval_datasets(client: ApiClient, seed: CourseSeed) -> dict[str, int]:
+    """Create demo-scale DRAFT evaluation datasets with honest annotations.
+
+    Retrieval cases reference the actual source chunk of each reviewed
+    concept, so every expected value is traceable to the served corpus.
+    Nothing here is frozen and no metric is produced: the acceptance sets of
+    spec §11.1 must be built separately.
+    """
+
+    course_id = str(seed.course["id"])
+    authored = DEMO_EVAL_CONTENT.get(seed.spec.code)
+    if not authored:
+        return {}
+    latest_version = seed.upload.get("latest_version") if seed.upload else None
+    document_version_id = (
+        latest_version.get("id") if isinstance(latest_version, dict) else None
+    )
+    if not isinstance(document_version_id, str) or not document_version_id:
+        raise SeedError(f"课程 {seed.spec.code} 缺少本次样例文档版本 ID。")
+    chunk_ids = _concept_chunk_ids(
+        client,
+        course_id,
+        document_version_id=document_version_id,
+    )
+
+    retrieval_cases: list[dict[str, Any]] = []
+    for concept_name, query in authored["retrieval"]:
+        chunk_id = chunk_ids.get(concept_name)
+        if not chunk_id:
+            print(f"  跳过检索用例：概念 {concept_name} 不在候选列表中。")
+            continue
+        retrieval_cases.append(
+            {
+                "case_key": f"retrieval-{concept_name}",
+                "input": {"query": query},
+                "expected": {"relevant_chunk_ids": [chunk_id]},
+                "labels": {"concept": concept_name},
+            }
+        )
+
+    routing_cases = [
+        {
+            "case_key": f"routing-{index:02d}",
+            "input": {"query": query},
+            "expected": {"expected_intent": intent},
+            "labels": {},
+        }
+        for index, (query, intent) in enumerate(authored["routing"], start=1)
+    ]
+    refusal_cases = [
+        {
+            "case_key": f"refusal-{index:02d}",
+            "input": {"query": query},
+            "expected": {"is_answerable": answerable},
+            "labels": {},
+        }
+        for index, (query, answerable) in enumerate(authored["refusal"], start=1)
+    ]
+
+    counts = {
+        "retrieval": _ensure_demo_dataset(
+            client,
+            course_id,
+            dataset_name=f"演示检索集-{seed.spec.code}",
+            dataset_type="RETRIEVAL",
+            cases=retrieval_cases,
+        ),
+        "routing": _ensure_demo_dataset(
+            client,
+            course_id,
+            dataset_name=f"演示路由集-{seed.spec.code}",
+            dataset_type="INTENT_ROUTING",
+            cases=routing_cases,
+        ),
+        "end_to_end": _ensure_demo_dataset(
+            client,
+            course_id,
+            dataset_name=f"演示拒答与引用集-{seed.spec.code}",
+            dataset_type="END_TO_END_QA",
+            cases=refusal_cases,
+        ),
+    }
+    print(
+        "  已创建/更新演示评测数据集（DRAFT，非冻结，不产出任何指标）："
+        f"检索 {counts['retrieval']} 条，路由 {counts['routing']} 条，"
+        f"拒答 {counts['end_to_end']} 条。"
+    )
+    return counts
+
+
 def join_courses(
     teacher_client: ApiClient, student_client: ApiClient, seeds: list[CourseSeed]
 ) -> None:
@@ -596,7 +924,10 @@ def join_courses(
             json_body={"invite_code": invite_code},
         )
         joined_course = joined.get("course") if isinstance(joined, dict) else None
-        if not isinstance(joined_course, dict) or str(joined_course.get("id")) != course_id:
+        if (
+            not isinstance(joined_course, dict)
+            or str(joined_course.get("id")) != course_id
+        ):
             raise SeedError(f"邀请码加入结果与课程 {seed.spec.code} 不一致。")
         enrolled_ids.add(course_id)
         print(f"  学生已通过邀请码加入 {seed.spec.code}。")
@@ -638,24 +969,29 @@ def parse_args() -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> None:
-    missing = [str(spec.sample_path) for spec in COURSES if not spec.sample_path.is_file()]
+    missing = [
+        str(spec.sample_path) for spec in COURSES if not spec.sample_path.is_file()
+    ]
     if missing:
         raise SeedError("缺少样例文件：" + ", ".join(missing))
-    if min(
-        args.request_timeout,
-        args.ingestion_timeout,
-        args.queue_timeout,
-        args.poll_interval,
-    ) <= 0:
+    if (
+        min(
+            args.request_timeout,
+            args.ingestion_timeout,
+            args.queue_timeout,
+            args.poll_interval,
+        )
+        <= 0
+    ):
         raise SeedError("所有 timeout 与 poll interval 参数都必须大于 0。")
 
     teacher_client = ApiClient(args.api_url, timeout=args.request_timeout)
     student_client = ApiClient(args.api_url, timeout=args.request_timeout)
 
-    print("[1/7] 检查 CoursePilot 服务")
+    print("[1/8] 检查 CoursePilot 服务")
     ensure_api_ready(teacher_client)
 
-    print("[2/7] 准备教师账号与两门课程")
+    print("[2/8] 准备教师账号与两门课程")
     ensure_account(
         teacher_client,
         email=args.teacher_email,
@@ -664,7 +1000,7 @@ def run(args: argparse.Namespace) -> None:
     )
     seeds = [ensure_course(teacher_client, spec) for spec in COURSES]
 
-    print("[3/7] 上传开放样例并轮询真实入库任务")
+    print("[3/8] 上传开放样例并轮询真实入库任务")
     for seed in seeds:
         upload = upload_sample(teacher_client, seed)
         wait_for_ingestion(
@@ -675,16 +1011,25 @@ def run(args: argparse.Namespace) -> None:
             poll_interval=args.poll_interval,
         )
 
-    print("[4/7] 审核证据完整的图谱候选并发布")
+    print("[4/8] 审核证据完整的图谱候选并发布")
     for seed in seeds:
-        approve_evidence_backed_candidates(teacher_client, str(seed.course["id"]))
+        title = _sample_title(seed.spec)
+        approve_evidence_backed_candidates(
+            teacher_client,
+            str(seed.course["id"]),
+            reject_concept_names=frozenset({title}) if title else frozenset(),
+        )
         publish_course(teacher_client, seed)
 
-    print("[5/7] 生成并审核来源题目")
+    print("[5/8] 生成并审核来源题目")
     for seed in seeds:
         ensure_approved_demo_quizzes(teacher_client, str(seed.course["id"]))
 
-    print("[6/7] 准备学生账号并通过邀请码加入")
+    print("[6/8] 建立演示规模评测数据集（DRAFT，非冻结，不产出指标）")
+    for seed in seeds:
+        ensure_eval_datasets(teacher_client, seed)
+
+    print("[7/8] 准备学生账号并通过邀请码加入")
     ensure_account(
         student_client,
         email=args.student_email,
@@ -693,7 +1038,7 @@ def run(args: argparse.Namespace) -> None:
     )
     join_courses(teacher_client, student_client, seeds)
 
-    print("[7/7] 完成")
+    print("[8/8] 完成")
     for seed in seeds:
         version = seed.upload.get("latest_version", {}) if seed.upload else {}
         print(

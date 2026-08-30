@@ -8,9 +8,8 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import aliased
 
 from app.models import (
     Chunk,
@@ -24,6 +23,10 @@ from app.models import (
 )
 
 from .types import DenseCandidate
+
+# Cosine similarities below this floor are treated as no evidence at all; the
+# calibrated score maps [floor, 1.0] linearly onto [0.0, 1.0].
+DENSE_SIMILARITY_FLOOR = 0.2
 
 
 class ModelDependencyUnavailableError(RuntimeError):
@@ -296,50 +299,65 @@ class PostgresPgVectorDenseRetriever:
         ):
             raise ValueError("embedding model returned an invalid query vector")
 
-        published_version = aliased(DocumentVersion)
-        latest_published_version = (
-            select(func.max(published_version.version))
-            .where(
-                published_version.document_id == Document.id,
-                published_version.status == DocumentVersionStatus.PUBLISHED,
-                published_version.deleted_at.is_(None),
-            )
-            .correlate(Document)
-            .scalar_subquery()
-        )
-        active_index_exists = exists(
+        # Historical chat sessions stay pinned to the index version that was
+        # active when they were created. That index becomes ARCHIVED when a new
+        # version is published, but its embeddings remain valid, so both ACTIVE
+        # and ARCHIVED indexes keep serving their pinned sessions.
+        served_index_exists = exists(
             select(CourseIndex.id).where(
                 CourseIndex.course_id == scoped_course_id,
                 CourseIndex.version == scoped_index_version,
-                CourseIndex.status == CourseIndexStatus.ACTIVE,
+                CourseIndex.status.in_(
+                    (CourseIndexStatus.ACTIVE, CourseIndexStatus.ARCHIVED)
+                ),
                 CourseIndex.deleted_at.is_(None),
             )
         )
         distance = Chunk.embedding.cosine_distance(query_vector).label(
             "cosine_distance"
         )
-        statement = (
-            select(Chunk, DocumentVersion, Document, distance)
-            .join(DocumentVersion, DocumentVersion.id == Chunk.version_id)
-            .join(Document, Document.id == DocumentVersion.document_id)
-            .where(
-                active_index_exists,
-                Document.course_id == scoped_course_id,
-                Document.status == DocumentStatus.ACTIVE,
-                Document.deleted_at.is_(None),
-                DocumentVersion.status == DocumentVersionStatus.PUBLISHED,
-                DocumentVersion.deleted_at.is_(None),
-                DocumentVersion.version == latest_published_version,
-                Chunk.status == RecordStatus.ACTIVE,
-                Chunk.deleted_at.is_(None),
-                Chunk.embedding.is_not(None),
-            )
-            .order_by(distance.asc(), Chunk.id.asc())
-            .limit(top_k)
-        )
+        base_filters = [
+            served_index_exists,
+            Document.course_id == scoped_course_id,
+            Document.status == DocumentStatus.ACTIVE,
+            Document.deleted_at.is_(None),
+            DocumentVersion.status == DocumentVersionStatus.PUBLISHED,
+            DocumentVersion.deleted_at.is_(None),
+            Chunk.status == RecordStatus.ACTIVE,
+            Chunk.deleted_at.is_(None),
+            Chunk.embedding.is_not(None),
+        ]
 
         async with self.session_factory() as session:
-            rows = (await session.execute(statement)).all()
+            covered = await session.scalar(
+                select(CourseIndex.covered_document_version_ids).where(
+                    CourseIndex.course_id == scoped_course_id,
+                    CourseIndex.version == scoped_index_version,
+                    CourseIndex.status.in_(
+                        (CourseIndexStatus.ACTIVE, CourseIndexStatus.ARCHIVED)
+                    ),
+                    CourseIndex.deleted_at.is_(None),
+                )
+            )
+            # Corpus-accurate scoping: only the document versions this index
+            # was actually built with may serve its pinned sessions. A null
+            # manifest belongs to a pre-migration index and fails closed; using
+            # the latest published version would leak new material into it.
+            covered_ids = [uuid.UUID(value) for value in (covered or []) if value]
+            corpus_filters = [
+                Chunk.version_id.in_(covered_ids),
+                DocumentVersion.id.in_(covered_ids),
+            ]
+            rows = (
+                await session.execute(
+                    select(Chunk, DocumentVersion, Document, distance)
+                    .join(DocumentVersion, DocumentVersion.id == Chunk.version_id)
+                    .join(Document, Document.id == DocumentVersion.document_id)
+                    .where(*base_filters, *corpus_filters)
+                    .order_by(distance.asc(), Chunk.id.asc())
+                    .limit(top_k)
+                )
+            ).all()
 
         candidates: list[DenseCandidate] = []
         for chunk, version, document, raw_distance in rows:
@@ -347,7 +365,19 @@ class PostgresPgVectorDenseRetriever:
             similarity = 1.0 - cosine_distance
             if not math.isfinite(similarity):
                 continue
-            normalized_score = max(0.0, min(1.0, (similarity + 1.0) / 2.0))
+            # BGE-M3 cosine similarity is not a calibrated probability: clearly
+            # unrelated texts still land around 0.1-0.4. Anchor the evidence
+            # score so only similarities that indicate topical relevance reach
+            # EvidencePolicy.minimum_score (0.55 ≈ similarity 0.64) instead of
+            # mapping a near-zero similarity to a passing score.
+            normalized_score = max(
+                0.0,
+                min(
+                    1.0,
+                    (similarity - DENSE_SIMILARITY_FLOOR)
+                    / (1.0 - DENSE_SIMILARITY_FLOOR),
+                ),
+            )
             candidates.append(
                 DenseCandidate(
                     chunk_id=str(chunk.id),

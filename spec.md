@@ -359,7 +359,8 @@ Agent 仅支持以下意图：
 
 #### FR-AGENT-003 Agent 图
 
-LangGraph 节点固定为：
+Agent 编排节点固定为（实现形态为自研 `TrustedAgentCore` 等价序列，不依赖
+LangGraph；取舍记录见 `PROJECT_MEMORY.md` 决策记录 2026-08-31）：
 
 ```text
 input_guard
@@ -843,7 +844,7 @@ INDEX_ROOT=/data/indexes
 
 ### Agent与图谱
 
-- 完成LangGraph路由、检索、证据校验和拒答。
+- 完成Agent路由、检索、证据校验和拒答（自研编排核心，见决策记录）。
 - 完成候选抽取、教师审核、Outbox和Neo4j。
 - 完成知识图谱可视化初版。
 

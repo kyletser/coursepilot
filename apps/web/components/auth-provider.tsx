@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import {
+  ApiError,
   apiRequest,
   getStoredSession,
   jsonBody,
@@ -17,6 +18,9 @@ import {
   setStoredSession,
 } from "@/lib/api";
 import type { AuthTokens, User, UserRole } from "@/lib/types";
+
+const AUTH_REJECTED = (error: unknown): boolean =>
+  error instanceof ApiError && error.status === 401;
 
 type AuthContextValue = {
   ready: boolean;
@@ -51,9 +55,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       setUser(nextUser);
       return nextUser;
-    } catch {
-      setStoredSession(null);
-      setUser(null);
+    } catch (error) {
+      if (AUTH_REJECTED(error)) {
+        setStoredSession(null);
+        setUser(null);
+      } else {
+        // Transient API/network failure: keep the stored tokens and fall back
+        // to the persisted user snapshot instead of logging the user out.
+        setUser(current.user ?? null);
+      }
       return null;
     } finally {
       setReady(true);
@@ -78,7 +88,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(nextUser);
       return nextUser;
     } catch (error) {
-      setStoredSession(null);
+      if (AUTH_REJECTED(error)) {
+        setStoredSession(null);
+      }
+      // Keep freshly issued tokens on transient failures; the next sync picks
+      // the profile up once the API is reachable again.
+      setUser(null);
       throw error;
     }
   }, []);

@@ -378,6 +378,10 @@ function optionEntries(options: QuizItem["options"]) {
 
 function StudentQuiz({ course }: { course: Course }) {
   const [item, setItem] = useState<QuizItem | null>(null);
+  // One idempotency key per quiz item, generated when the item is loaded and
+  // reused across submit retries: FR-QUIZ-002 requires that a timeout followed
+  // by a resubmit replays the original attempt instead of updating mastery twice.
+  const [attemptKey, setAttemptKey] = useState("");
   const [answer, setAnswer] = useState("");
   const [result, setResult] = useState<QuizAttempt | null>(null);
   const [loading, setLoading] = useState(true);
@@ -389,6 +393,7 @@ function StudentQuiz({ course }: { course: Course }) {
     setError(null);
     setResult(null);
     setAnswer("");
+    setAttemptKey(crypto.randomUUID());
     try {
       const data = await apiRequest<QuizItem | QuizItem[] | { items?: QuizItem[] }>(
         `/courses/${course.id}/quizzes/next`,
@@ -410,14 +415,14 @@ function StudentQuiz({ course }: { course: Course }) {
 
   async function submitAttempt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!item || !answer) return;
+    if (!item || !answer || !attemptKey) return;
     setSubmitting(true);
     setError(null);
     try {
       setResult(
         await apiRequest<QuizAttempt>(`/quizzes/${item.id}/attempts`, {
           method: "POST",
-          ...jsonBody({ answer, idempotency_key: crypto.randomUUID() }),
+          ...jsonBody({ answer, idempotency_key: attemptKey }),
         }),
       );
     } catch (nextError) {

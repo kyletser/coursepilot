@@ -44,6 +44,7 @@ class _FakeSession:
     def __init__(self, rows) -> None:
         self.rows = rows
         self.statement = None
+        self.covered_version_ids: list[str] | None = None
 
     async def __aenter__(self):
         return self
@@ -54,6 +55,10 @@ class _FakeSession:
     async def execute(self, statement):
         self.statement = statement
         return _FakeRows(self.rows)
+
+    async def scalar(self, statement):
+        # Legacy corpus shape: no coverage recorded.
+        return self.covered_version_ids
 
 
 class _FakeSessionFactory:
@@ -78,6 +83,7 @@ async def test_pgvector_dense_query_is_scoped_to_active_published_corpus():
         0.2,
     )
     session = _FakeSession([row])
+    session.covered_version_ids = [str(uuid.uuid4())]
     factory = _FakeSessionFactory(session)
     embedding = _FakeEmbedding([0.0] * 1024)
     retriever = PostgresPgVectorDenseRetriever(
@@ -97,16 +103,41 @@ async def test_pgvector_dense_query_is_scoped_to_active_published_corpus():
     assert len(candidates) == 1
     assert candidates[0].chunk_id == str(chunk_id)
     assert candidates[0].score == pytest.approx(0.8)
-    assert candidates[0].metadata["normalized_score"] == pytest.approx(0.9)
+    # Calibrated mapping: (0.8 - 0.2) / 0.8. A near-zero similarity must not
+    # map to a passing evidence score.
+    assert candidates[0].metadata["normalized_score"] == pytest.approx(0.75)
     assert candidates[0].metadata["document"] == "操作系统课件"
 
     compiled = session.statement.compile(dialect=postgresql.dialect())
     sql = str(compiled)
     assert "<=>" in sql
     assert "course_indexes" in sql
-    assert "document_versions_1" in sql and "max(" in sql
-    assert CourseIndexStatus.ACTIVE in compiled.params.values()
+    assert "chunks.version_id" in sql
+    # Historical sessions keep dense service from ARCHIVED indexes too; the
+    # status set is bound as one expanding list parameter.
+    assert [CourseIndexStatus.ACTIVE, CourseIndexStatus.ARCHIVED] in list(
+        compiled.params.values()
+    )
     assert DocumentVersionStatus.PUBLISHED in compiled.params.values()
+
+
+async def test_pgvector_dense_query_fails_closed_without_corpus_manifest():
+    session = _FakeSession([])
+    retriever = PostgresPgVectorDenseRetriever(
+        _FakeSessionFactory(session),  # type: ignore[arg-type]
+        _FakeEmbedding([0.0] * 1024),
+        dialect_name="postgresql",
+    )
+
+    candidates = await retriever.search(
+        course_id=str(uuid.uuid4()),
+        index_version="1",
+        query="页面置换",
+    )
+
+    assert candidates == []
+    compiled = session.statement.compile(dialect=postgresql.dialect())
+    assert "chunks.version_id" in str(compiled)
 
 
 async def test_sqlite_dense_route_fails_before_loading_embedding_model():

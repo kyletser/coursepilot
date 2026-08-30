@@ -52,7 +52,8 @@ class DatabaseLexicalRetriever:
     The persisted BM25 artifact remains the preferred production route. This
     implementation is also useful while a process cache is cold and in tests: it
     builds the same deterministic lightweight BM25 index from authoritative,
-    published chunks and never reads text outside the requested course.
+    published chunks restricted to the document versions the pinned index
+    covers, and never reads text outside the requested course.
     """
 
     def __init__(
@@ -61,29 +62,42 @@ class DatabaseLexicalRetriever:
         *,
         course_id: uuid.UUID,
         index_version: int,
+        covered_version_ids: Sequence[uuid.UUID | str] | None = None,
     ) -> None:
         self.session = session
         self.course_id = course_id
         self.index_version = index_version
+        # Missing coverage means an index predates the corpus manifest. Treat
+        # it as an empty corpus instead of restoring the old course-wide query,
+        # which would let newly published document versions enter pinned chats.
+        self._covered_version_ids: frozenset[uuid.UUID] = frozenset(
+            uuid.UUID(str(value)) for value in (covered_version_ids or ()) if value
+        )
         self._index: LightweightBM25Index | None = None
 
     async def _load(self) -> LightweightBM25Index:
         if self._index is not None:
             return self._index
+        filters = [
+            Document.course_id == self.course_id,
+            Document.status == DocumentStatus.ACTIVE,
+            DocumentVersion.status == DocumentVersionStatus.PUBLISHED,
+            Chunk.status == RecordStatus.ACTIVE,
+            Chunk.deleted_at.is_(None),
+            DocumentVersion.deleted_at.is_(None),
+            Document.deleted_at.is_(None),
+        ]
+        # Restrict the fallback corpus to the versions the pinned index
+        # actually built with; otherwise content published after this version
+        # would silently enter an older session's evidence. An empty set is the
+        # intentional fail-closed behavior for pre-manifest indexes.
+        filters.append(DocumentVersion.id.in_(self._covered_version_ids))
         rows = (
             await self.session.execute(
                 select(Chunk, DocumentVersion, Document)
                 .join(DocumentVersion, DocumentVersion.id == Chunk.version_id)
                 .join(Document, Document.id == DocumentVersion.document_id)
-                .where(
-                    Document.course_id == self.course_id,
-                    Document.status == DocumentStatus.ACTIVE,
-                    DocumentVersion.status == DocumentVersionStatus.PUBLISHED,
-                    Chunk.status == RecordStatus.ACTIVE,
-                    Chunk.deleted_at.is_(None),
-                    DocumentVersion.deleted_at.is_(None),
-                    Document.deleted_at.is_(None),
-                )
+                .where(*filters)
                 .order_by(Document.id, DocumentVersion.version, Chunk.ordinal)
             )
         ).all()
@@ -303,7 +317,7 @@ class CourseMaterialEvidenceRetriever:
                     else None,
                     page=chunk.page,
                     text=chunk.content,
-                    score=self._normalized_score(candidate, rank),
+                    score=self._normalized_score(candidate),
                 )
             )
             if len(evidence) >= top_k:
@@ -311,9 +325,23 @@ class CourseMaterialEvidenceRetriever:
         return evidence
 
     @staticmethod
-    def _normalized_score(candidate: Any, rank: int) -> float:
+    def _normalized_score(candidate: Any) -> float:
         if isinstance(candidate, Evidence):
             return candidate.score
+
+        # A successful reranker is the final relevance judgment and must take
+        # precedence over route-level dense/BM25 scores carried in metadata.
+        # Route scores are consulted only when reranking was skipped or failed.
+        if isinstance(candidate, FusedCandidate) and candidate.rerank_score is not None:
+            value = float(candidate.rerank_score)
+            if math.isfinite(value):
+                if 0.0 <= value <= 1.0:
+                    return value
+                if value >= 0.0:
+                    return 1.0 / (1.0 + math.exp(-value))
+                exped = math.exp(value)
+                return exped / (1.0 + exped)
+
         metadata = getattr(candidate, "metadata", {})
         if isinstance(candidate, Mapping):
             metadata = candidate.get("metadata", {})
@@ -324,13 +352,6 @@ class CourseMaterialEvidenceRetriever:
                 if math.isfinite(value) and 0.0 <= value <= 1.0:
                     return value
 
-        # RRF and BM25 scores are not calibrated probabilities. A positive ranked
-        # match crosses the Agent boundary using a conservative, rank-based score;
-        # empty lexical searches still produce no evidence and therefore abstain.
-        if isinstance(candidate, FusedCandidate) and candidate.rerank_score is not None:
-            value = float(candidate.rerank_score)
-            if math.isfinite(value) and 0.0 <= value <= 1.0:
-                return value
         raw_score = (
             getattr(candidate, "score", None)
             if not isinstance(candidate, Mapping)
@@ -344,7 +365,12 @@ class CourseMaterialEvidenceRetriever:
             value = float(raw_score)
             if math.isfinite(value) and 0.0 <= value <= 1.0:
                 return value
-        return max(0.56, 1.0 - (rank - 1) * 0.06)
+        # BM25 and RRF outputs are not calibrated probabilities. A candidate
+        # whose route did not supply a normalized score must not cross the
+        # evidence gate: the previous rank-based fallback (max(0.56, ...)) let
+        # every lexical hit pass EvidencePolicy.minimum_score and hollowed out
+        # insufficient-evidence refusal.
+        return 0.0
 
 
 def build_retrieval_backend(
@@ -373,6 +399,7 @@ def build_retrieval_backend(
             session,
             course_id=index.course_id,
             index_version=index.version,
+            covered_version_ids=index.covered_document_version_ids,
         )
         configured_lexical = getattr(app_state, "lexical_retriever", None) or getattr(
             app_state, "lexical_index_manager", None

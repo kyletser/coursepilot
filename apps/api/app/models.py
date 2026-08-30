@@ -745,6 +745,11 @@ class CourseIndex(UUIDPrimaryKeyMixin, TimestampedMixin, Base):
         default=IndexComponentStatus.PENDING,
     )
     lexical_path: Mapped[str | None] = mapped_column(String(1024))
+    # Document versions whose chunks are inside this index's corpus. Recorded
+    # when the lexical artifact is built; retrieval, dense scoping, and graph
+    # publication only ever touch versions this index actually covers, so
+    # content ingested after the build cannot leak into an older version.
+    covered_document_version_ids: Mapped[list[str] | None] = mapped_column(JSON)
     status: Mapped[CourseIndexStatus] = mapped_column(
         course_index_status_enum,
         nullable=False,

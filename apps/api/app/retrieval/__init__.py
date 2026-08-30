@@ -1,4 +1,5 @@
 from .adapters import (
+    DENSE_SIMILARITY_FLOOR,
     BGEM3EmbeddingAdapter,
     BgeM3EmbeddingAdapter,
     BGERerankerAdapter,
@@ -40,6 +41,7 @@ from .types import (
 
 __all__ = [
     "ARTIFACT_FILENAME",
+    "DENSE_SIMILARITY_FLOOR",
     "BGEM3EmbeddingAdapter",
     "BGERerankerAdapter",
     "BgeM3EmbeddingAdapter",

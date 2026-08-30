@@ -50,6 +50,7 @@ from app.models import (
     UserRole,
 )
 from app.retrieval import (
+    DENSE_SIMILARITY_FLOOR,
     BGEM3EmbeddingAdapter,
     BGERerankerAdapter,
     DenseCandidate,
@@ -221,7 +222,12 @@ class _ReadyIndexPgVectorDenseRetriever:
                     content=chunk.content,
                     metadata={
                         "normalized_score": max(
-                            0.0, min(1.0, (similarity + 1.0) / 2.0)
+                            0.0,
+                            min(
+                                1.0,
+                                (similarity - DENSE_SIMILARITY_FLOOR)
+                                / (1.0 - DENSE_SIMILARITY_FLOOR),
+                            ),
                         ),
                         "document": document.logical_name,
                         "document_version": str(version.version),

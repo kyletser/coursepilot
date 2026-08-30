@@ -413,6 +413,13 @@ class GraphService:
                     "lexical_status": target.lexical_status.value,
                 },
             )
+        if target.covered_document_version_ids is None:
+            raise AppError(
+                409,
+                "GRAPH_INDEX_COVERAGE_UNKNOWN",
+                "This index predates corpus manifests and must be rebuilt before publication",
+                details={"index_id": str(target.id), "index_version": target.version},
+            )
 
         pending_concepts = await self.session.scalar(
             select(func.count())
@@ -470,18 +477,25 @@ class GraphService:
         target.status = CourseIndexStatus.ACTIVE
         target.published_at = now
 
+        # Only versions whose chunks are inside the target index's corpus may
+        # become PUBLISHED here. Content ingested after the index was built is
+        # left for the next build + publication cycle, keeping "new versions
+        # serve only after full indexing" verifiable and citations version-true.
+        covered_ids = target.covered_document_version_ids
+        covered_version_ids = {uuid.UUID(value) for value in covered_ids if value}
+        ready_filter = [
+            Document.course_id == course_id,
+            Document.deleted_at.is_(None),
+            DocumentVersion.deleted_at.is_(None),
+            DocumentVersion.status == DocumentVersionStatus.READY_FOR_REVIEW,
+        ]
+        ready_filter.append(DocumentVersion.id.in_(covered_version_ids))
         version_ids = list(
             (
                 await self.session.scalars(
                     select(DocumentVersion.id)
                     .join(Document, Document.id == DocumentVersion.document_id)
-                    .where(
-                        Document.course_id == course_id,
-                        Document.deleted_at.is_(None),
-                        DocumentVersion.deleted_at.is_(None),
-                        DocumentVersion.status
-                        == DocumentVersionStatus.READY_FOR_REVIEW,
-                    )
+                    .where(*ready_filter)
                     .with_for_update()
                 )
             ).all()

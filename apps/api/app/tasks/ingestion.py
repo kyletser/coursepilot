@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -11,7 +12,34 @@ from app.ingestion.pipeline import (
     DocumentEmbeddingAdapter,
     run_ingestion_pipeline,
 )
+from app.retrieval import BGEM3EmbeddingAdapter
 from app.worker import celery_app
+
+_embedding_adapter: DocumentEmbeddingAdapter | None = None
+_embedding_lock = threading.Lock()
+
+
+def shared_embedding_adapter(settings: Settings) -> DocumentEmbeddingAdapter:
+    """One embedding adapter per worker process.
+
+    Loading BGE-M3 costs roughly 2 GB of memory and tens of seconds, so
+    Celery tasks must reuse a process-level singleton instead of reloading
+    the model for every job. The adapter stays lazy: nothing is loaded until
+    the first embed call, which also keeps weights out of the prefork parent.
+    """
+
+    global _embedding_adapter
+    adapter = _embedding_adapter
+    if adapter is None:
+        with _embedding_lock:
+            if _embedding_adapter is None:
+                _embedding_adapter = BGEM3EmbeddingAdapter(
+                    settings.embedding_model,
+                    allow_download=settings.model_allow_download,
+                    cache_folder=settings.hf_home,
+                )
+            adapter = _embedding_adapter
+    return adapter
 
 
 async def run_ingestion_job(
@@ -33,7 +61,8 @@ async def run_ingestion_job(
             job_id,
             session_factory=session_factory,
             settings=resolved_settings,
-            embedding_adapter=embedding_adapter,
+            embedding_adapter=embedding_adapter
+            or shared_embedding_adapter(resolved_settings),
         )
     finally:
         if engine is not None:

@@ -335,6 +335,7 @@ async def test_publish_is_guarded_and_switches_index_and_ingestion_atomically(
             dense_status=IndexComponentStatus.READY,
             lexical_status=IndexComponentStatus.READY,
             status=CourseIndexStatus.READY,
+            covered_document_version_ids=[str(version_id)],
         )
         job = IngestionJob(
             version_id=version_id,

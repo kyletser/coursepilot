@@ -184,6 +184,50 @@ stack.append(item)
     assert all("# 栈" not in block.text for block in parsed.blocks)
 
 
+def test_markdown_front_matter_is_stripped_not_embedded():
+    markdown = """---
+title: 数据结构：从接口到不变量
+license: CC-BY-4.0
+provenance: CoursePilot 原创开放样例
+---
+
+# 数据结构
+
+线性表是按线性顺序组织元素的数据结构。
+"""
+    parsed = parse_document(markdown.encode(), "ds.md")
+    assert len(parsed.blocks) == 1
+    # Metadata keys and the front-matter block never reach chunks, retrieval,
+    # or the deterministic heading candidate extractor.
+    assert all("license" not in block.text for block in parsed.blocks)
+    assert all("title:" not in block.text for block in parsed.blocks)
+    assert parsed.blocks[0].section_path == ("数据结构",)
+
+
+def test_markdown_front_matter_with_windows_newlines_is_stripped():
+    markdown = (
+        "---\r\n"
+        "title: 操作系统\r\n"
+        "license: CC-BY-4.0\r\n"
+        "---\r\n\r\n"
+        "# 操作系统\r\n\r\n"
+        "进程是资源分配与执行状态的载体。\r\n"
+    )
+    parsed = parse_document(markdown.encode(), "os.md")
+    assert len(parsed.blocks) == 1
+    assert "title:" not in parsed.blocks[0].text
+    assert parsed.blocks[0].section_path == ("操作系统",)
+
+
+def test_markdown_without_front_matter_is_unchanged():
+    markdown = "--- 剧情分隔线并不是前置元数据\n\n正文继续。\n"
+    parsed = parse_document(markdown.encode(), "note.md")
+    # A "--- " line with trailing text is a horizontal rule / paragraph, not a
+    # front-matter fence: nothing is stripped.
+    assert len(parsed.blocks) == 2
+    assert "剧情分隔线" in parsed.blocks[0].text
+
+
 def test_chunker_enforces_bounds_structure_and_stable_adjacency():
     section = ("第一章", "线性表")
     document = ParsedDocument(

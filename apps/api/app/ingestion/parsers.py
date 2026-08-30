@@ -115,6 +115,24 @@ def detect_document_format(data: bytes, filename: str) -> DocumentFormat:
     return expected
 
 
+_YAML_FRONT_MATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n.*?\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|\Z)",
+    re.DOTALL,
+)
+
+
+def _strip_markdown_front_matter(text: str) -> str:
+    """Remove a leading YAML front-matter block from markdown text.
+
+    Front matter is document metadata (license, provenance, title), not course
+    content. Left in place it would be embedded and retrievable like any other
+    paragraph and its section lines could surface as knowledge candidates.
+    """
+
+    match = _YAML_FRONT_MATTER_RE.match(text)
+    return text[match.end() :] if match else text
+
+
 def parse_document(data: bytes, filename: str) -> ParsedDocument:
     """Parse supported document bytes without executing active or linked content."""
 
@@ -126,7 +144,10 @@ def parse_document(data: bytes, filename: str) -> ParsedDocument:
     elif document_format is DocumentFormat.PPTX:
         blocks = _parse_pptx(data)
     elif document_format is DocumentFormat.MARKDOWN:
-        blocks, _ = _parse_line_oriented(_decode_text_document(data), markdown=True)
+        blocks, _ = _parse_line_oriented(
+            _strip_markdown_front_matter(_decode_text_document(data)),
+            markdown=True,
+        )
     else:
         blocks, _ = _parse_line_oriented(_decode_text_document(data))
 

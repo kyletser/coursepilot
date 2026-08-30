@@ -78,9 +78,31 @@ def test_lightweight_bm25_searches_chinese_and_english_consistently():
 
     assert chinese[0].chunk_id == "os-1"
     assert english[0].chunk_id == "os-1"
-    assert chinese[0].metadata == {"page": 42}
+    assert chinese[0].metadata["page"] == 42
+    assert 0.0 <= chinese[0].metadata["normalized_score"] <= 1.0
     assert all(math.isfinite(candidate.score) for candidate in chinese + english)
     assert index.search("不存在的术语 xyzzy", top_k=5) == []
+
+
+def test_lightweight_bm25_normalized_score_discriminates_partial_query_coverage():
+    index = LightweightBM25Index(
+        [
+            LexicalDocument("full", "alpha beta"),
+            LexicalDocument("partial", "alpha"),
+        ]
+    )
+
+    hits = index.search("alpha beta", top_k=2)
+    by_chunk = {hit.chunk_id: hit for hit in hits}
+
+    # The document containing every query term covers ~all of the query's
+    # achievable BM25 mass; the document matching only one of two terms must
+    # stay below EvidencePolicy.minimum_score instead of passing by rank.
+    assert by_chunk["full"].metadata["normalized_score"] > 0.55
+    assert by_chunk["partial"].metadata["normalized_score"] < 0.55
+    # Raw BM25 stays available for traces and fusion ordering.
+    assert by_chunk["full"].score > 0
+    assert [hit.chunk_id for hit in hits] == ["full", "partial"]
 
 
 def test_course_version_artifact_save_and_replace_are_atomic(tmp_path):

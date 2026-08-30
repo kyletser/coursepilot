@@ -25,11 +25,11 @@ CoursePilot 的产品定位最终确定为：
 | 首版课程 | 数据结构、操作系统 |
 | 实施节奏 | 连续推进，不按周切分 |
 | 前端 | Next.js、TypeScript、Tailwind CSS |
-| 后端 | FastAPI、Pydantic、SQLAlchemy、Alembic、LangGraph |
+| 后端 | FastAPI、Pydantic、SQLAlchemy、Alembic；Agent 编排为自研核心（LangGraph 取舍见决策记录 2026-08-31） |
 | 异步任务 | Celery、Redis |
 | 业务与向量数据库 | PostgreSQL、pgvector |
 | 课程知识图谱 | Neo4j |
-| Lexical 检索 | bm25s，每个课程版本独立索引 |
+| Lexical 检索 | bm25s 为目标方案，当前使用自研等价实现（见决策记录 2026-08-31），每个课程版本独立索引 |
 | Embedding | 本地 BGE-M3 |
 | Reranker | 本地 BGE-Reranker-v2-m3 |
 | Chat Model | OpenAI 兼容 API，通过环境变量配置 |
@@ -135,8 +135,9 @@ CoursePilot 的产品定位最终确定为：
 - 已初始化 Git、Next.js Web、FastAPI API、Celery Worker、Docker Compose 与 CI。
 - 已实现统一响应契约、JWT 双角色、Refresh Token 轮换、课程、邀请码和 Enrollment 权限闭环及首个 Alembic 迁移。
 - 已实现文档安全入库与分块、pgvector/BGE/词法混合检索及降级、证据关系抽取、候选图谱审核与 Outbox 发布、带引用可信问答、测验审核与幂等作答、掌握度、学习路径和冻结评测数据闭环。
-- 已实现教师与学生双角色 Web 工作台，包含课程发布、知识图谱、学习历史、Bad Case、评测中心和学生学习汇总；本地关键回归包含 108 项后端测试以及前端 lint、类型检查和生产构建。
-- 已提供两门原创 CC-BY-4.0 开放样例、一键真实入库脚本和三组检索基线运行器；脚本遇到模型或基础设施缺失时明确失败。
+- 已实现教师与学生双角色 Web 工作台，包含课程发布、知识图谱、学习历史、Bad Case、评测中心和学生学习汇总；本地关键回归包含 122 项后端测试以及前端 lint、类型检查和生产构建。
+- 已提供两门原创 CC-BY-4.0 开放样例、一键真实入库脚本和三组检索基线运行器；脚本遇到模型或基础设施缺失时明确失败。种子脚本额外创建演示规模、人工标注的 DRAFT 评测数据集（检索用例绑定真实 chunk ID），不冻结、不产出任何指标。
+- 2026-08-31 修复审查确认的高优先缺陷：`CourseIndex` 记录语料覆盖集（迁移 0003）并贯通检索、发布与旧会话服务（版本隔离）；证据分数门槛改为真实校准（BM25 覆盖分、dense 相似度锚定、rerank sigmoid），移除按排名伪造的兜底分；Worker 进程级复用 BGE-M3；前端测验幂等键随题生成、网络瞬断不再清除登录态；Markdown 前置元数据入库即剥离；文档与决策记录同步（LangGraph/bm25s/确定性抽取）。
 - 尚未把任何演示指标写入项目结论；下一步在 Docker daemon 可用的干净环境中完成真实样例入库、冻结评测和质量门槛验收。
 
 ## 10. 决策记录维护规则
@@ -153,3 +154,7 @@ CoursePilot 的产品定位最终确定为：
 | 2026-08-30 | 模型不可用时显式降级且禁止伪造向量 | 保持课程证据和实验结果可追溯 | Dense 状态保留为待处理，问答仅使用真实可用索引；恢复模型后重建 |
 | 2026-08-30 | 确定性关系只接受标题层级和显式前置标记 | 防止章节顺序或模型常识被误当成课程依赖 | 所有关系仍进入 PENDING，由教师审核后才影响 Student |
 | 2026-08-30 | 三组基线只对冻结数据和真实索引执行 | 防止工程测试或外部提交结果冒充模型效果 | EvalRun 与报告固化版本和环境；缺少个性化实绩时直接失败 |
+| 2026-08-31 | Agent 编排不引入 LangGraph，使用自研 `TrustedAgentCore` 序列（guard → route → retrieve → grade → rewrite → generate → verify） | MVP 依赖最小化；预算、grounding 与信任边界的确定性控制用显式代码更易审计与测试；spec FR-AGENT-003 的节点行为已等价实现 | 第 2 节“后端”中的 LangGraph 仅作为行为规格参考；如后续需要状态机回放/检查点再评估引入 |
+| 2026-08-31 | 词法检索先用自研 `LightweightBM25Index`，为 bm25s 预留适配位 | 语料规模小（单课程演示级），自研实现可持久化可复现的工件并输出带归一化覆盖分的候选；避免 MVP 阶段额外原生依赖 | 第 2 节“Lexical 检索”的 bm25s 目标不变；工件 schema 已兼容后续替换 |
+| 2026-08-31 | 知识候选抽取用 `deterministic-heading-v1` 而非 LLM 抽取 | 标题结构可信、可复现、零额外成本；候选仍全部进入教师审核 | FR-GRAPH-002 的 LLM 抽取路径保留为后续增强 |
+| 2026-08-31 | `CourseIndex` 记录 `covered_document_version_ids`，检索与发布只作用于该覆盖集 | 修复版本隔离缺陷：旧版本会话不得引用新发布语料，发布不得翻转索引未覆盖的文档版本 | 数据契约新增可空 JSON 列（迁移 0003）；无覆盖集的迁移前索引检索时失败关闭，发布前必须重建 |

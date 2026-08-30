@@ -100,6 +100,7 @@ class LightweightBM25Index:
 
         document_count = len(self.documents)
         scores: dict[int, float] = defaultdict(float)
+        matched_term_idf: dict[str, float] = {}
         for term in query_terms:
             matches = self._postings.get(term, ())
             document_frequency = len(matches)
@@ -110,6 +111,7 @@ class LightweightBM25Index:
                 + (document_count - document_frequency + 0.5)
                 / (document_frequency + 0.5)
             )
+            matched_term_idf[term] = inverse_document_frequency
             for document_number in matches:
                 term_frequency = self._term_frequencies[document_number][term]
                 document_length = self._document_lengths[document_number]
@@ -125,6 +127,15 @@ class LightweightBM25Index:
                     term_frequency * (self.k1 + 1.0) / denominator
                 )
 
+        # BM25 mass is unbounded, so raw scores cannot cross the Agent evidence
+        # gate directly. Candidates additionally carry a calibrated 0..1
+        # coverage score: the fraction of the query's achievable BM25 mass this
+        # document captured, relative to a document that contains every
+        # in-vocabulary query term once at average document length. Matching
+        # only rare terms of a multi-term query therefore scores low instead of
+        # passing any threshold by rank.
+        idf_total = sum(matched_term_idf.values())
+
         ranked = sorted(
             scores.items(),
             key=lambda item: (-item[1], self.documents[item[0]].chunk_id),
@@ -134,7 +145,12 @@ class LightweightBM25Index:
                 chunk_id=self.documents[document_number].chunk_id,
                 score=score,
                 content=self.documents[document_number].content,
-                metadata=self.documents[document_number].metadata,
+                metadata={
+                    **self.documents[document_number].metadata,
+                    "normalized_score": (
+                        min(1.0, score / idf_total) if idf_total > 0 else 0.0
+                    ),
+                },
             )
             for document_number, score in ranked
             if score > 0

@@ -155,7 +155,12 @@ async function refreshTokens(): Promise<AuthTokens> {
   try {
     return await refreshInFlight;
   } catch (error) {
-    setStoredSession(null);
+    // Only a definitive auth rejection invalidates the stored refresh token.
+    // A transient network failure or API 5xx must not silently log the user
+    // out and throw away a still-valid 14-day refresh token.
+    if (error instanceof ApiError && error.status === 401) {
+      setStoredSession(null);
+    }
     throw error;
   }
 }

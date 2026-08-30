@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 from pydantic import ValidationError
@@ -29,6 +30,7 @@ from app.agent import (
     lexical_claim_support,
     verify_grounding,
 )
+from app.retrieval import DenseCandidate, FusedCandidate, LexicalCandidate
 
 
 def evidence_record(
@@ -288,6 +290,42 @@ async def test_insufficient_evidence_refuses_before_chat_adapter_is_called():
     assert response.error_code == INSUFFICIENT_EVIDENCE
     assert response.citations == []
     assert chat.calls == 0
+
+
+def test_uncalibrated_retrieval_scores_never_cross_the_evidence_gate():
+    from app.agent.service import CourseMaterialEvidenceRetriever
+
+    normalize = CourseMaterialEvidenceRetriever._normalized_score
+
+    # Raw BM25/RRF outputs without a route-supplied normalized score must not
+    # be promoted to passing evidence scores by a rank-based fallback.
+    assert normalize(LexicalCandidate("c1", 12.5)) == 0.0
+    assert normalize({"chunk_id": "c1", "score": 3.0}) == 0.0
+    assert normalize(FusedCandidate("c1", rrf_score=0.31)) == 0.0
+
+    # Explicitly calibrated route scores pass through unchanged.
+    assert normalize(
+        LexicalCandidate("c2", 4.0, metadata={"normalized_score": 0.42})
+    ) == pytest.approx(0.42)
+    assert normalize(
+        DenseCandidate("c3", 0.8, metadata={"normalized_score": 0.75})
+    ) == pytest.approx(0.75)
+
+    # Out-of-range rerank logits are calibrated through a logistic.
+    assert normalize(
+        FusedCandidate(
+            "c4",
+            rrf_score=0.2,
+            metadata={"normalized_score": 0.95},
+            rerank_score=-2.0,
+        )
+    ) == pytest.approx(1.0 / (1.0 + math.exp(2.0)))
+    assert normalize(
+        FusedCandidate("c5", rrf_score=0.2, rerank_score=4.0)
+    ) == pytest.approx(1.0 / (1.0 + math.exp(-4.0)))
+    assert normalize(
+        FusedCandidate("c6", rrf_score=0.2, rerank_score=0.9)
+    ) == pytest.approx(0.9)
 
 
 @pytest.mark.asyncio

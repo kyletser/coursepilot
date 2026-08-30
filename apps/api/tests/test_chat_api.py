@@ -89,6 +89,7 @@ async def _course_with_index(client, app_instance, *, suffix: str):
                 dense_status=IndexComponentStatus.FAILED,
                 lexical_status=IndexComponentStatus.READY,
                 status=CourseIndexStatus.ACTIVE,
+                covered_document_version_ids=[str(version.id)],
             )
         )
         await db.commit()

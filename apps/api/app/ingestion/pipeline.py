@@ -564,6 +564,11 @@ class IngestionPipeline:
             current_document_id=document_id,
             current_version_id=version_id,
         )
+        covered_version_ids: list[str] = []
+        for document in lexical_documents:
+            version_id_value = str(document.metadata.get("version_id", ""))
+            if version_id_value and version_id_value not in covered_version_ids:
+                covered_version_ids.append(version_id_value)
         manager = LexicalIndexManager(self.settings.index_root)
         artifact_path = await asyncio.to_thread(
             manager.publish,
@@ -579,6 +584,7 @@ class IngestionPipeline:
                 raise LookupError(f"Course index {course_index_id} was not found")
             course_index.lexical_status = IndexComponentStatus.READY
             course_index.lexical_path = str(artifact_path)
+            course_index.covered_document_version_ids = covered_version_ids
             job.stage_details = {
                 **dict(job.stage_details or {}),
                 "last_safe_stage": IngestionStage.LEXICAL_INDEXING.value,
@@ -586,6 +592,7 @@ class IngestionPipeline:
                     "status": IndexComponentStatus.READY.value,
                     "path": str(artifact_path),
                     "document_count": len(lexical_documents),
+                    "covered_document_version_count": len(covered_version_ids),
                 },
             }
             await session.commit()
