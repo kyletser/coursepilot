@@ -307,12 +307,22 @@ class GraphService:
 
     async def approved_graph(self, course_id: uuid.UUID, user: User) -> dict[str, Any]:
         await self._authorized_course(course_id, user)
+        active_index = await self.session.scalar(
+            select(CourseIndex).where(
+                CourseIndex.course_id == course_id,
+                CourseIndex.status == CourseIndexStatus.ACTIVE,
+                CourseIndex.deleted_at.is_(None),
+            )
+        )
+        if active_index is None:
+            raise AppError(409, "ACTIVE_INDEX_REQUIRED", "The course has no active index")
         concepts = (
             await self.session.scalars(
                 select(ConceptCandidate)
                 .where(
                     ConceptCandidate.course_id == course_id,
                     ConceptCandidate.status == ReviewStatus.APPROVED,
+                    ConceptCandidate.index_id == active_index.id,
                     ConceptCandidate.deleted_at.is_(None),
                 )
                 .order_by(ConceptCandidate.name.asc(), ConceptCandidate.id.asc())
@@ -322,16 +332,22 @@ class GraphService:
         concept_ids = set(concept_lookup)
         relations: list[RelationCandidate] = []
         if concept_ids:
+            covered_version_ids = {
+                uuid.UUID(str(value))
+                for value in (active_index.covered_document_version_ids or ())
+            }
             relations = list(
                 (
                     await self.session.scalars(
                         select(RelationCandidate)
+                        .join(Chunk, Chunk.id == RelationCandidate.source_chunk_id)
                         .where(
                             RelationCandidate.course_id == course_id,
                             RelationCandidate.status == ReviewStatus.APPROVED,
                             RelationCandidate.deleted_at.is_(None),
                             RelationCandidate.from_candidate_id.in_(concept_ids),
                             RelationCandidate.to_candidate_id.in_(concept_ids),
+                            Chunk.version_id.in_(covered_version_ids),
                         )
                         .order_by(
                             RelationCandidate.type.asc(), RelationCandidate.id.asc()
@@ -339,24 +355,13 @@ class GraphService:
                     )
                 ).all()
             )
-        active_index = await self.session.scalar(
-            select(CourseIndex).where(
-                CourseIndex.course_id == course_id,
-                CourseIndex.status == CourseIndexStatus.ACTIVE,
-                CourseIndex.deleted_at.is_(None),
-            )
-        )
         return {
             "course_id": course_id,
-            "published_index": (
-                {
-                    "id": active_index.id,
-                    "version": active_index.version,
-                    "published_at": active_index.published_at,
-                }
-                if active_index is not None
-                else None
-            ),
+            "published_index": {
+                "id": active_index.id,
+                "version": active_index.version,
+                "published_at": active_index.published_at,
+            },
             "concepts": [
                 {
                     "id": candidate.id,

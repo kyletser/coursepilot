@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -36,6 +38,8 @@ from app.models import (
     RecordStatus,
     User,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
@@ -252,6 +256,7 @@ async def get_chat_messages(
                     "citation_id": citation.id,
                     "label": citation.label,
                     "claim_index": citation.claim_index,
+                    "claim_indices": citation.claim_indices,
                     "chunk_id": citation.chunk_id,
                     "quote": citation.quote,
                     "document": document.logical_name,
@@ -341,38 +346,80 @@ async def send_chat_message(
         created_at=turn_started_at + timedelta(microseconds=1),
     )
     session.add_all([user_message, assistant_message])
-    await session.flush()
+    await session.commit()
 
     backend = build_retrieval_backend(request.app.state, session, index=index)
     chat_adapter = getattr(request.app.state, "chat_adapter", None)
-    try:
-        turn = await run_trusted_turn(
-            session,
-            backend=backend,
-            chat_adapter=chat_adapter,
-            course_id=chat_session.course_id,
-            student_id=student.id,
-            index_version=chat_session.index_version,
-            query=payload.content,
-            requested_intent=payload.requested_intent,
-            target_concept_ids=payload.target_concept_ids,
-            trace_id=trace_id,
-        )
-    except AgentCoreError as exc:
-        assistant_message.content = str(exc)
-        assistant_message.status = MessageStatus.FAILED
-        assistant_message.error_code = exc.code
-        assistant_message.usage = {"agent_status": "FAILED", "retrieval_traces": []}
-        await session.commit()
-        events = [
-            _sse(
-                "status",
-                {"stage": "retrieving", "trace_id": str(trace_id)},
-            ),
-            _sse("error", {"code": exc.code, "message": str(exc)}),
-        ]
-    else:
+    async def event_stream() -> AsyncIterator[str]:
+        # Start the response before retrieval/generation so clients receive a
+        # real first event immediately and cancellation propagates into work.
+        yield _sse("status", {"stage": "retrieving", "trace_id": str(trace_id)})
+        try:
+            turn = await run_trusted_turn(
+                session,
+                backend=backend,
+                chat_adapter=chat_adapter,
+                course_id=chat_session.course_id,
+                student_id=student.id,
+                index_version=chat_session.index_version,
+                query=payload.content,
+                requested_intent=payload.requested_intent,
+                target_concept_ids=payload.target_concept_ids,
+                trace_id=trace_id,
+            )
+        except asyncio.CancelledError:
+            async def mark_disconnected() -> None:
+                async with request.app.state.session_factory() as cleanup_session:
+                    stored = await cleanup_session.get(Message, assistant_message.id)
+                    if stored is not None and stored.status == MessageStatus.PENDING:
+                        stored.content = "客户端已中断请求。"
+                        stored.status = MessageStatus.FAILED
+                        stored.error_code = "CLIENT_DISCONNECTED"
+                        stored.usage = {
+                            "agent_status": "CANCELLED",
+                            "retrieval_traces": [],
+                        }
+                        await cleanup_session.commit()
+
+            await asyncio.shield(mark_disconnected())
+            raise
+        except AgentCoreError as exc:
+            code, message = exc.code, str(exc)
+            assistant_message.content = message
+            assistant_message.status = MessageStatus.FAILED
+            assistant_message.error_code = code
+            assistant_message.usage = {"agent_status": "FAILED", "retrieval_traces": []}
+            await session.commit()
+            yield _sse("error", {"code": code, "message": message})
+            return
+        except Exception as exc:
+            logger.exception("Chat stream failed", extra={"trace_id": str(trace_id)})
+            assistant_message.content = "课程问答处理失败。"
+            assistant_message.status = MessageStatus.FAILED
+            assistant_message.error_code = "AGENT_FAILED"
+            assistant_message.usage = {
+                "agent_status": "FAILED",
+                "retrieval_traces": [],
+                "exception": type(exc).__name__,
+            }
+            await session.commit()
+            yield _sse(
+                "error", {"code": "AGENT_FAILED", "message": "课程问答处理失败。"}
+            )
+            return
+
         response = turn.response
+        yield _sse(
+            "retrieval",
+            _retrieval_event(
+                query=turn.retrieval_query or payload.content,
+                candidate_count=turn.candidate_count,
+                index_version=chat_session.index_version,
+                traces=turn.retrieval_traces,
+            ),
+        )
+        yield _sse("status", {"stage": "verifying", "trace_id": str(trace_id)})
+
         assistant_message.content = response.answer
         assistant_message.intent = AgentIntent(response.route.intent.value)
         assistant_message.error_code = response.error_code
@@ -405,6 +452,7 @@ async def send_chat_message(
                 message_id=assistant_message.id,
                 chunk_id=chunk_id,
                 quote=source.quote,
+                claim_indices=list(source.claim_indices),
                 claim_index=source.claim_indices[0],
                 label=source.label,
             )
@@ -413,63 +461,42 @@ async def send_chat_message(
         await session.flush()
         await session.commit()
 
-        retrieval_query = turn.retrieval_query or payload.content
-        events = [
-            _sse(
-                "status",
-                {"stage": "retrieving", "trace_id": str(trace_id)},
-            ),
-            _sse(
-                "retrieval",
-                _retrieval_event(
-                    query=retrieval_query,
-                    candidate_count=turn.candidate_count,
-                    index_version=chat_session.index_version,
-                    traces=turn.retrieval_traces,
-                ),
-            ),
-        ]
         if terminal_error:
-            events.append(
-                _sse(
-                    "error",
-                    {
-                        "code": response.error_code or "AGENT_FAILED",
-                        "message": response.error_message or response.answer,
-                    },
-                )
+            yield _sse(
+                "error",
+                {
+                    "code": response.error_code or "AGENT_FAILED",
+                    "message": response.error_message or response.answer,
+                },
             )
-        else:
-            events.append(_sse("token", {"text": response.answer}))
-            for source, record in citation_records:
-                events.append(
-                    _sse(
-                        "citation",
-                        {
-                            "citation_id": str(record.id),
-                            "label": source.label,
-                            "document": source.document,
-                            "document_version": source.document_version,
-                            "section": source.section,
-                            "page": source.page,
-                            "chunk_id": source.chunk_id,
-                        },
-                    )
-                )
-            events.append(
-                _sse(
-                    "done",
-                    {
-                        "message_id": str(assistant_message.id),
-                        "intent": response.route.intent.value,
-                        "usage": response.budget.model_dump(mode="json"),
-                    },
-                )
-            )
+            return
 
-    async def event_stream() -> AsyncIterator[str]:
-        for event in events:
-            yield event
+        # Grounding is complete before answer text crosses the trust boundary;
+        # split the verified result into incremental chunks for responsive UI.
+        for offset in range(0, len(response.answer), 48):
+            yield _sse("token", {"text": response.answer[offset : offset + 48]})
+        for source, record in citation_records:
+            yield _sse(
+                "citation",
+                {
+                    "citation_id": str(record.id),
+                    "label": source.label,
+                    "document": source.document,
+                    "document_version": source.document_version,
+                    "section": source.section,
+                    "page": source.page,
+                    "chunk_id": source.chunk_id,
+                    "claim_indices": source.claim_indices,
+                },
+            )
+        yield _sse(
+            "done",
+            {
+                "message_id": str(assistant_message.id),
+                "intent": response.route.intent.value,
+                "usage": response.budget.model_dump(mode="json"),
+            },
+        )
 
     return StreamingResponse(
         event_stream(),

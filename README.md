@@ -60,13 +60,15 @@ python scripts/seed_demo.py
 
 ## 冻结评测与三组基线
 
-Teacher 可在评测中心创建并冻结 Retrieval 数据集。数据集必须包含人工确认的相关 Chunk；`kg_personalized` 的每个 Case 还必须指向真实在课 Student、已审核目标概念和实际 MasteryState。然后从 `apps/api` 运行：
+Teacher 可在评测中心创建并冻结 Retrieval 数据集。数据集必须包含人工确认的相关 Chunk；`kg_personalized` 的每个 Case 还必须指向真实在课 Student、已审核目标概念和实际 MasteryState。冻结后可在页面点击“启动服务端评测”，也可以从 `apps/api` 运行：
 
 ```powershell
 uv run python -m app.evaluation.runner --dataset-id <dataset-uuid> --index-version <version>
 ```
 
 运行器会真实执行 `dense_only`、`hybrid_rerank` 和 `kg_personalized`，分别持久化 EvalRun，并向 `evaluation-reports/` 写入不可覆盖的版本化 JSON。报告固化 Git、数据集、索引、模型、Prompt、检索参数和硬件信息。缺少真实上下文时运行器会失败；测试中的 Fake provider 不会产生项目指标。
+
+浏览器认证由 Next.js 同源 BFF 托管，Access/Refresh Token 只放在 `HttpOnly` Cookie 中；前端 JavaScript 和 `localStorage` 均无法读取令牌。
 
 ## 服务拓扑
 

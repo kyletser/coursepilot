@@ -52,7 +52,7 @@ def test_migrations_upgrade_and_downgrade(monkeypatch, tmp_path):
         revision = connection.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
-        assert revision == "0003_course_index_coverage"
+        assert revision == "0004_citation_claim_indices"
 
     # SQLite reflects named enum CHECK constraints differently from PostgreSQL.
     # CI runs `alembic check` against the real PostgreSQL schema.

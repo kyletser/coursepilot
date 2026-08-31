@@ -1,18 +1,9 @@
 import type {
   ApiEnvelope,
-  AuthTokens,
   ChatStreamEvent,
-  User,
 } from "@/lib/types";
 
 const API_PREFIX = "/api/v1";
-const SESSION_KEY = "coursepilot.auth.v1";
-
-export type StoredSession = {
-  tokens: AuthTokens;
-  user?: User;
-};
-
 export class ApiError extends Error {
   code: string;
   details: Record<string, unknown>;
@@ -34,36 +25,6 @@ export class ApiError extends Error {
     this.details = options.details ?? {};
     this.requestId = options.requestId;
     this.status = options.status;
-  }
-}
-
-function canUseStorage() {
-  return typeof window !== "undefined";
-}
-
-export function getStoredSession(): StoredSession | null {
-  if (!canUseStorage()) return null;
-  try {
-    const raw = window.localStorage.getItem(SESSION_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredSession;
-    if (!parsed.tokens?.access_token || !parsed.tokens?.refresh_token) {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-export function setStoredSession(session: StoredSession | null) {
-  if (!canUseStorage()) return;
-  if (session) {
-    window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
-    window.dispatchEvent(new Event("coursepilot:auth-change"));
-  } else {
-    window.localStorage.removeItem(SESSION_KEY);
-    window.dispatchEvent(new Event("coursepilot:auth-change"));
   }
 }
 
@@ -106,10 +67,9 @@ async function readEnvelope<T>(
   return { ...envelope, data, error: null };
 }
 
-function buildHeaders(init?: RequestInit, accessToken?: string) {
+function buildHeaders(init?: RequestInit) {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
-  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
   if (init?.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -126,43 +86,23 @@ function toApiError(error: unknown) {
   });
 }
 
-let refreshInFlight: Promise<AuthTokens> | null = null;
+let refreshInFlight: Promise<void> | null = null;
 
-async function refreshTokens(): Promise<AuthTokens> {
-  const current = getStoredSession();
-  if (!current?.tokens.refresh_token) {
-    throw new ApiError("登录状态已失效，请重新登录", {
-      code: "AUTH_REQUIRED",
-      status: 401,
-    });
-  }
-
+async function refreshTokens(): Promise<void> {
   if (!refreshInFlight) {
     refreshInFlight = (async () => {
       const response = await fetch(`${API_PREFIX}/auth/refresh`, {
         method: "POST",
         headers: buildHeaders({ body: "{}" }),
-        body: JSON.stringify({ refresh_token: current.tokens.refresh_token }),
+        body: "{}",
       });
-      const { data } = await readEnvelope<AuthTokens>(response);
-      setStoredSession({ tokens: data, user: current.user });
-      return data;
+      await readEnvelope<{ authenticated: boolean }>(response);
     })().finally(() => {
       refreshInFlight = null;
     });
   }
 
-  try {
-    return await refreshInFlight;
-  } catch (error) {
-    // Only a definitive auth rejection invalidates the stored refresh token.
-    // A transient network failure or API 5xx must not silently log the user
-    // out and throw away a still-valid 14-day refresh token.
-    if (error instanceof ApiError && error.status === 401) {
-      setStoredSession(null);
-    }
-    throw error;
-  }
+  return await refreshInFlight;
 }
 
 async function fetchWithAuth(
@@ -170,17 +110,17 @@ async function fetchWithAuth(
   init: RequestInit = {},
   retryAfterRefresh = true,
 ) {
-  const current = getStoredSession();
   const response = await fetch(`${API_PREFIX}${path}`, {
     ...init,
-    headers: buildHeaders(init, current?.tokens.access_token),
+    headers: buildHeaders(init),
   });
 
-  if (response.status === 401 && retryAfterRefresh && current) {
-    const tokens = await refreshTokens();
+  const canRefresh = !["/auth/login", "/auth/refresh", "/auth/logout"].includes(path);
+  if (response.status === 401 && retryAfterRefresh && canRefresh) {
+    await refreshTokens();
     return fetch(`${API_PREFIX}${path}`, {
       ...init,
-      headers: buildHeaders(init, tokens.access_token),
+      headers: buildHeaders(init),
     });
   }
   return response;

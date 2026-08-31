@@ -51,6 +51,10 @@ class QueryRewriteAdapter(Protocol):
     def rewrite(self, *, query: str, route: IntentRoute) -> Any: ...
 
 
+class BusinessIntentHandler(Protocol):
+    def handle(self, *, request: AgentRequest, route: IntentRoute) -> Any: ...
+
+
 class TrustedAgentCore:
     """Dependency-light trusted core suitable for a later LangGraph wrapper.
 
@@ -65,6 +69,7 @@ class TrustedAgentCore:
         router: ValidatedIntentRouter | None = None,
         retriever: EvidenceRetriever | None = None,
         query_rewriter: QueryRewriteAdapter | None = None,
+        business_handler: BusinessIntentHandler | None = None,
         chat_adapter: ChatAdapter | None = None,
         evidence_policy: EvidencePolicy | None = None,
         input_guard: InputGuard | None = None,
@@ -76,6 +81,7 @@ class TrustedAgentCore:
         self.router = router or ValidatedIntentRouter()
         self.retriever = retriever
         self.query_rewriter = query_rewriter
+        self.business_handler = business_handler
         self.chat_adapter = chat_adapter
         self.evidence_policy = evidence_policy or EvidencePolicy()
         self.input_guard = input_guard or InputGuard()
@@ -102,6 +108,23 @@ class TrustedAgentCore:
 
             budget.record_step("route_intent")
             route = await self.router.route(request)
+
+            if self.business_handler is not None:
+                budget.record_step("handle_business_intent")
+                budget.record_tool_call(f"handle_{route.intent.value.lower()}")
+                handled = self.business_handler.handle(request=request, route=route)
+                if inspect.isawaitable(handled):
+                    handled = await handled
+                if handled is not None:
+                    if not isinstance(handled, AgentResponse):
+                        handled = AgentResponse.model_validate(handled)
+                    return handled.model_copy(
+                        update={
+                            "route": route,
+                            "budget": budget.snapshot(),
+                            "warnings": [*warnings, *handled.warnings],
+                        }
+                    )
 
             if not route.needs_retrieval:
                 return AgentResponse(

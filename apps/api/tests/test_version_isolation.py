@@ -8,7 +8,7 @@ import uuid
 import pytest_asyncio
 from sqlalchemy import select
 
-from app.agent.service import DatabaseLexicalRetriever
+from app.agent.service import CourseMaterialEvidenceRetriever, DatabaseLexicalRetriever
 from app.models import (
     Chunk,
     CourseIndex,
@@ -141,6 +141,46 @@ async def test_database_lexical_fallback_only_serves_covered_versions(
     # A pre-migration index has no trustworthy corpus manifest. It must fail
     # closed instead of admitting every published version into a pinned chat.
     assert legacy_hits == []
+
+
+async def test_authoritative_hydration_rejects_candidates_outside_index_manifest(
+    client, app_instance
+):
+    _, tokens = await register_and_login(
+        client, "hydrate-owner@example.com", role="TEACHER"
+    )
+    course = await create_course(client, tokens, code="HYDRATE-1")
+    course_id = uuid.UUID(course["id"])
+    _, covered_version = await _seed_document_version(
+        app_instance, course_id, logical_name="covered", content="covered text"
+    )
+    _, uncovered_version = await _seed_document_version(
+        app_instance, course_id, logical_name="uncovered", content="uncovered text"
+    )
+    uncovered_chunk = await _first_chunk_id(app_instance, uncovered_version)
+    async with app_instance.state.session_factory() as session:
+        session.add(
+            CourseIndex(
+                course_id=course_id,
+                version=1,
+                dense_status=IndexComponentStatus.READY,
+                lexical_status=IndexComponentStatus.READY,
+                status=CourseIndexStatus.ACTIVE,
+                covered_document_version_ids=[str(covered_version)],
+            )
+        )
+        await session.commit()
+        retriever = CourseMaterialEvidenceRetriever(
+            session,
+            backend=object(),
+            course_id=course_id,
+            index_version=1,
+            trace_id=uuid.uuid4(),
+        )
+        hydrated = await retriever._hydrate(
+            [{"chunk_id": str(uncovered_chunk), "score": 0.99}], top_k=8
+        )
+    assert hydrated == []
 
 
 async def _first_chunk_id(app_instance, version_id: uuid.UUID) -> uuid.UUID:

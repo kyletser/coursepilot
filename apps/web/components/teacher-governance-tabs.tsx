@@ -249,6 +249,7 @@ export function EvaluationPanel({ courseId }: { courseId: string }) {
   const [caseInput, setCaseInput] = useState("");
   const [expected, setExpected] = useState("");
   const [labels, setLabels] = useState("");
+  const [indexVersion, setIndexVersion] = useState("1");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -302,12 +303,25 @@ export function EvaluationPanel({ courseId }: { courseId: string }) {
   async function freezeDataset() {
     if (!selected || !window.confirm("冻结后 Case 不可编辑。确定继续吗？")) return;
     setSaving(true); setError(null); setNotice("");
-    try { await apiRequest(`/eval-datasets/${selected.id}/freeze`, { method: "POST" }); setNotice("评测集已冻结，可使用下方 CLI 运行真实三基线实验。"); await loadEvaluation(); }
+    try { await apiRequest(`/eval-datasets/${selected.id}/freeze`, { method: "POST" }); setNotice("评测集已冻结，可以启动服务端三基线实验。"); await loadEvaluation(); }
     catch (nextError) { setError(nextError); } finally { setSaving(false); }
   }
 
+  async function launchEvaluation() {
+    if (!selected) return;
+    setSaving(true); setError(null); setNotice("");
+    try {
+      await apiRequest(`/eval-datasets/${selected.id}/runs`, {
+        method: "POST",
+        body: JSON.stringify({ index_version: Number(indexVersion) }),
+      });
+      setNotice("真实三基线评测已进入服务端队列，可在运行列表中刷新查看状态。");
+      await loadEvaluation();
+    } catch (nextError) { setError(nextError); } finally { setSaving(false); }
+  }
+
   const runnableDataset = selected?.type === "RETRIEVAL" ? selected : null;
-  const command = `uv run python -m app.evaluation.runner --dataset-id ${runnableDataset?.id ?? "<retrieval-dataset-uuid>"} --index-version <version>`;
+  const command = `uv run python -m app.evaluation.runner --dataset-id ${runnableDataset?.id ?? "<retrieval-dataset-uuid>"} --index-version ${indexVersion || "<version>"}`;
 
   return (
     <div className="space-y-5">
@@ -322,7 +336,7 @@ export function EvaluationPanel({ courseId }: { courseId: string }) {
 
       {selected?.status === "DRAFT" ? <Panel><h3 className="font-semibold text-[#263936]">添加人工标注 Case</h3><p className="mt-1 text-xs text-[#75817e]">Input、Expected 和 Labels 均为必填 JSON 对象；页面不会预填标签或结果。</p><form className="mt-4 grid gap-4" onSubmit={addCase}><label><FieldLabel>Case key</FieldLabel><input className={fieldClass} onChange={(event) => setCaseKey(event.target.value)} required value={caseKey} /></label><div className="grid gap-4 lg:grid-cols-3"><label><FieldLabel>Input JSON</FieldLabel><textarea className={`${fieldClass} font-mono text-xs`} onChange={(event) => setCaseInput(event.target.value)} placeholder="{}" required rows={7} value={caseInput} /></label><label><FieldLabel>Expected JSON</FieldLabel><textarea className={`${fieldClass} font-mono text-xs`} onChange={(event) => setExpected(event.target.value)} placeholder="{}" required rows={7} value={expected} /></label><label><FieldLabel>Labels JSON</FieldLabel><textarea className={`${fieldClass} font-mono text-xs`} onChange={(event) => setLabels(event.target.value)} placeholder="{}" required rows={7} value={labels} /></label></div><button className={primaryButtonClass} disabled={saving} type="submit">{saving ? <Spinner label="正在写入" /> : "添加 Case"}</button></form></Panel> : null}
 
-      <Panel><h3 className="font-semibold text-[#263936]">真实三基线运行命令</h3><p className="mt-2 text-sm leading-6 text-[#687370]">浏览器不会假装运行实验。在仓库终端执行以下命令，它会真实运行 dense_only、hybrid_rerank 和 kg_personalized。</p>{selected && selected.type !== "RETRIEVAL" ? <p className="mt-3 rounded-xl bg-[#f5ecdc] px-3 py-2 text-xs text-[#8b602b]">三基线 Runner 只接受已冻结的 Retrieval 数据集；请改选 Retrieval 版本。</p> : null}<pre className="mt-4 overflow-x-auto rounded-xl bg-[#102b2a] p-4 text-xs leading-6 text-[#f8f5ed]"><code>{`cd apps/api\n${command}`}</code></pre></Panel>
+      <Panel><h3 className="font-semibold text-[#263936]">启动真实三基线评测</h3><p className="mt-2 text-sm leading-6 text-[#687370]">服务端将真实运行 dense_only、hybrid_rerank 和 kg_personalized；页面不接收或生成伪造 Case 结果。</p>{selected && selected.type !== "RETRIEVAL" ? <p className="mt-3 rounded-xl bg-[#f5ecdc] px-3 py-2 text-xs text-[#8b602b]">三基线 Runner 只接受已冻结的 Retrieval 数据集；请改选 Retrieval 版本。</p> : null}<div className="mt-4 flex flex-wrap items-end gap-3"><label><FieldLabel>索引版本</FieldLabel><input className={`${fieldClass} w-32`} min="1" onChange={(event) => setIndexVersion(event.target.value)} type="number" value={indexVersion} /></label><button className={primaryButtonClass} disabled={saving || selected?.status !== "FROZEN" || selected?.type !== "RETRIEVAL" || Number(indexVersion) < 1} onClick={() => void launchEvaluation()} type="button">{saving ? <Spinner label="正在排队" /> : "启动服务端评测"}</button></div><details className="mt-4"><summary className="cursor-pointer text-xs font-semibold text-[#61716d]">CLI 备用命令</summary><pre className="mt-2 overflow-x-auto rounded-xl bg-[#102b2a] p-4 text-xs leading-6 text-[#f8f5ed]"><code>{`cd apps/api\n${command}`}</code></pre></details></Panel>
 
       <section><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><p className="section-label">Recorded runs</p><h3 className="mt-2 text-xl font-semibold text-[#263936]">已持久化运行</h3></div><button className={secondaryButtonClass} disabled={loading} onClick={() => void loadEvaluation()} type="button"><RefreshIcon className={`size-4 ${loading ? "animate-spin" : ""}`} />刷新</button></div>{loading ? <Panel><Spinner label="正在读取评测运行" /></Panel> : runs.items.length ? <ul className="grid gap-4">{runs.items.map((run) => <li key={run.id}><Panel><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex flex-wrap gap-2"><StatusPill value={run.status} />{run.dataset_type ? <StatusPill value={run.dataset_type} /> : null}</div><p className="mt-3 font-semibold text-[#263936]">{run.dataset_name ?? run.dataset_id}{run.dataset_version ? ` · v${run.dataset_version}` : ""}</p><p className="mt-2 text-xs text-[#687370]">Git {run.git_commit} · Index v{run.index_version} · {formatDate(run.finished_at ?? run.created_at)}</p><p className="mt-1 break-all font-mono text-[10px] text-[#8a9491]">Trace {run.trace_id}</p></div></div>{run.error_message ? <p className="mt-4 rounded-xl bg-[#fff0ec] p-3 text-sm text-[#944237]">{run.error_code}: {run.error_message}</p> : null}<div className="mt-4 grid gap-3 lg:grid-cols-2"><div><p className="text-xs font-semibold text-[#61716d]">真实指标</p><pre className="mt-2 max-h-72 overflow-auto rounded-xl bg-white/70 p-3 text-xs text-[#30433f]">{run.metrics ? JSON.stringify(run.metrics, null, 2) : "暂无指标"}</pre></div><details><summary className="cursor-pointer text-xs font-semibold text-[#61716d]">运行配置与来源</summary><pre className="mt-2 max-h-72 overflow-auto rounded-xl bg-white/70 p-3 text-xs text-[#30433f]">{JSON.stringify(run.config, null, 2)}</pre></details></div></Panel></li>)}</ul> : <EmptyState description="执行上方 CLI 后，真实指标与可追溯配置会显示在这里。" title="尚无评测运行" />}</section>
     </div>

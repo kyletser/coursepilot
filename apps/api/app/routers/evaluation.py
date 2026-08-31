@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from fastapi import APIRouter, BackgroundTasks, Query, Request
+from pydantic import Field, field_validator, model_validator
+from sqlalchemy import select
 
 from app.dependencies import SessionDep, TeacherUser
 from app.errors import success_response
 from app.evaluation import service
+from app.evaluation.runner import run_three_baselines
 from app.models import (
     BadCaseSourceType,
     BadCaseStatus,
     EvalDatasetType,
+    EvalRun,
     EvalRunStatus,
 )
 from app.schemas import RequestModel
@@ -70,67 +75,77 @@ class EvalCaseUpdateRequest(RequestModel):
         return self
 
 
-class EvalRunConfigRequest(BaseModel):
-    # Experiment-specific deterministic parameters may be added and are retained.
-    model_config = ConfigDict(extra="allow")
-
-    git_commit: str = Field(min_length=1, max_length=64)
-    dataset_version: int | str | None = None
-    index_version: int = Field(ge=1)
-    model_versions: dict[str, str] = Field(min_length=1)
-    prompt_version: str = Field(min_length=1, max_length=255)
-    retrieval_parameters: dict[str, Any] = Field(min_length=1)
-    hardware: dict[str, Any] = Field(min_length=1)
-
-    @field_validator("git_commit", "prompt_version")
-    @classmethod
-    def strip_version_string(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("must not be blank")
-        return value.strip()
-
-
 class EvalRunCreateRequest(RequestModel):
-    config: EvalRunConfigRequest
-    case_results: dict[str, Any] = Field(default_factory=dict)
+    index_version: int = Field(ge=1)
+    report_version: str | None = Field(default=None, min_length=1, max_length=255)
+    prompt_version: str = Field(
+        default="no-generation/retrieval-eval-v1", min_length=1, max_length=255
+    )
+    route_top_k: int = Field(default=20, ge=1, le=100)
+    fusion_top_k: int = Field(default=20, ge=1, le=100)
+    final_top_k: int = Field(default=10, ge=1, le=100)
+    rrf_k: int = Field(default=60, ge=1, le=1000)
+    reranker_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    graph_depth: int = Field(default=2, ge=0, le=4)
+    kg_weight: float = Field(default=1.0, ge=0, le=10)
 
-    @model_validator(mode="before")
-    @classmethod
-    def accept_compact_payload(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        data = dict(value)
-        if "case_results" not in data:
-            for alias in ("results", "outputs"):
-                if alias in data:
-                    data["case_results"] = data.pop(alias)
-                    break
-        if "config" not in data:
-            result = data.pop("case_results", {})
-            data = {"config": data, "case_results": result}
-        return data
 
-    @field_validator("case_results", mode="before")
-    @classmethod
-    def normalize_case_results(cls, value: Any) -> Any:
-        if not isinstance(value, list):
-            return value
-        normalized: dict[str, Any] = {}
-        for item in value:
-            if not isinstance(item, dict) or not isinstance(item.get("case_key"), str):
-                raise TypeError("each result needs a case_key")
-            case_key = item["case_key"]
-            output = item.get("output")
-            if output is None:
-                output = {
-                    key: field_value
-                    for key, field_value in item.items()
-                    if key != "case_key"
-                }
-            if case_key in normalized:
-                raise ValueError("duplicate case result")
-            normalized[case_key] = output
-        return normalized
+async def _execute_eval_run(app_state: Any, run_id: uuid.UUID) -> None:
+    async with app_state.session_factory() as session:
+        run = await session.scalar(
+            select(EvalRun).where(EvalRun.id == run_id).with_for_update()
+        )
+        if run is None or run.status != EvalRunStatus.QUEUED:
+            return
+        run.status = EvalRunStatus.RUNNING
+        run.started_at = datetime.now(UTC)
+        await session.commit()
+        dataset_id = run.dataset_id
+        launch = dict(run.config.get("launch", {}))
+
+    try:
+        result = await run_three_baselines(
+            session_factory=app_state.session_factory,
+            settings=app_state.settings,
+            dataset_id=dataset_id,
+            index_version=int(launch["index_version"]),
+            output_dir=Path("evaluation-reports"),
+            report_version=launch.get("report_version"),
+            prompt_version=str(launch["prompt_version"]),
+            route_top_k=int(launch["route_top_k"]),
+            fusion_top_k=int(launch["fusion_top_k"]),
+            final_top_k=int(launch["final_top_k"]),
+            rrf_k=int(launch["rrf_k"]),
+            reranker_timeout_seconds=float(launch["reranker_timeout_seconds"]),
+            graph_depth=int(launch["graph_depth"]),
+            kg_weight=float(launch["kg_weight"]),
+        )
+    except Exception as exc:  # noqa: BLE001 - the job records every terminal failure
+        async with app_state.session_factory() as session:
+            run = await session.get(EvalRun, run_id)
+            if run is not None:
+                run.status = EvalRunStatus.FAILED
+                run.error_code = getattr(exc, "code", "EVAL_RUN_FAILED")
+                run.error_message = str(exc)[:4000]
+                run.finished_at = datetime.now(UTC)
+                await session.commit()
+        return
+
+    async with app_state.session_factory() as session:
+        run = await session.get(EvalRun, run_id)
+        if run is not None:
+            run.status = EvalRunStatus.SUCCEEDED
+            run.metrics = {
+                "report_path": str(result.report_path),
+                "baseline_run_ids": {
+                    mode: str(child_id) for mode, child_id in result.eval_run_ids.items()
+                },
+                "baselines": result.report["baselines"],
+            }
+            provenance = result.report["provenance"]
+            run.git_commit = str(provenance["git_commit"])
+            run.finished_at = datetime.now(UTC)
+            await session.commit()
 
 
 class BadCaseCreateRequest(RequestModel):
@@ -280,22 +295,28 @@ async def freeze_eval_dataset(
     )
 
 
-@router.post("/eval-datasets/{dataset_id}/runs", status_code=201)
+@router.post("/eval-datasets/{dataset_id}/runs", status_code=202)
 async def create_eval_run(
     dataset_id: uuid.UUID,
     payload: EvalRunCreateRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     session: SessionDep,
     teacher: TeacherUser,
 ):
-    run = await service.create_run(
+    launch = payload.model_dump()
+    run = await service.queue_run(
         session,
         dataset_id=dataset_id,
         teacher=teacher,
-        raw_config=payload.config.model_dump(),
-        case_results=payload.case_results,
+        launch_config=launch,
     )
-    return success_response(request, service.run_data(run), status_code=201)
+    dispatcher = getattr(request.app.state, "evaluation_run_dispatcher", None)
+    if dispatcher is not None:
+        await dispatcher(run.id, launch)
+    elif request.app.state.settings.environment != "test":
+        background_tasks.add_task(_execute_eval_run, request.app.state, run.id)
+    return success_response(request, service.run_data(run), status_code=202)
 
 
 @router.get("/eval-runs/{run_id}")

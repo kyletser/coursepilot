@@ -1189,6 +1189,65 @@ async def create_run(
     return run
 
 
+async def queue_run(
+    session: AsyncSession,
+    *,
+    dataset_id: uuid.UUID,
+    teacher: User,
+    launch_config: Mapping[str, Any],
+) -> EvalRun:
+    """Create a server-executed evaluation job without accepting measured output."""
+
+    dataset = await _owned_dataset(session, dataset_id, teacher)
+    if dataset.status != EvalDatasetStatus.FROZEN or dataset.frozen_at is None:
+        raise AppError(
+            409,
+            "EVAL_DATASET_NOT_FROZEN",
+            "Evaluation runs require a frozen dataset",
+        )
+    if dataset.type != EvalDatasetType.RETRIEVAL:
+        raise AppError(
+            409,
+            "EVAL_DATASET_TYPE_INVALID",
+            "The server runner currently accepts RETRIEVAL datasets only",
+        )
+    index_version = int(launch_config["index_version"])
+    course_index = await session.scalar(
+        select(CourseIndex).where(
+            CourseIndex.course_id == dataset.course_id,
+            CourseIndex.version == index_version,
+            CourseIndex.status.in_({CourseIndexStatus.READY, CourseIndexStatus.ACTIVE}),
+            CourseIndex.deleted_at.is_(None),
+        )
+    )
+    if course_index is None:
+        raise AppError(
+            409,
+            "EVAL_INDEX_NOT_READY",
+            "The configured course index version is missing or not ready",
+        )
+    config = {
+        "schema_version": RUN_CONFIG_SCHEMA_VERSION,
+        "execution": "SERVER_THREE_BASELINE_RUNNER",
+        "dataset": {"id": str(dataset.id), "version": dataset.version},
+        "course_index": {"id": str(course_index.id), "version": index_version},
+        "launch": dict(launch_config),
+    }
+    _json_digest(config)
+    run = EvalRun(
+        dataset_id=dataset.id,
+        config=config,
+        status=EvalRunStatus.QUEUED,
+        trace_id=uuid.uuid4(),
+        git_commit="server-detected-pending",
+        index_version=index_version,
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+    return run
+
+
 async def get_run(
     session: AsyncSession, *, run_id: uuid.UUID, teacher: User
 ) -> EvalRun:

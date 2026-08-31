@@ -943,6 +943,9 @@ class Citation(UUIDPrimaryKeyMixin, TimestampedMixin, Base):
         ForeignKey("chunks.id", ondelete="RESTRICT"), nullable=False
     )
     quote: Mapped[str] = mapped_column(Text, nullable=False)
+    # Keep the complete grounding relation. ``claim_index`` remains as the
+    # first binding for backwards-compatible history consumers.
+    claim_indices: Mapped[list[int]] = mapped_column(JSON, nullable=False, default=list)
     claim_index: Mapped[int] = mapped_column(Integer, nullable=False)
     label: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[RecordStatus] = mapped_column(

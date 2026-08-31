@@ -4,15 +4,22 @@ import json
 import uuid
 
 import pytest_asyncio
+from sqlalchemy import select
 
+from app.agent.schemas import AnswerDraft, ClaimDraft
 from app.models import (
     Chunk,
+    ConceptCandidate,
     CourseIndex,
     CourseIndexStatus,
     Document,
     DocumentVersion,
     DocumentVersionStatus,
     IndexComponentStatus,
+    MasteryState,
+    QuizDifficulty,
+    QuizItem,
+    ReviewStatus,
 )
 from app.routers import chat
 from tests.helpers import auth_headers, create_course, register_and_login
@@ -120,13 +127,14 @@ async def test_grounded_sse_answer_is_persisted_with_citation(client, app_instan
     assert [name for name, _ in events] == [
         "status",
         "retrieval",
+        "status",
         "token",
         "citation",
         "done",
     ]
-    assert events[2][1]["text"].endswith("[1]")
-    assert events[3][1]["document"] == "操作系统课件"
-    assert events[3][1]["page"] == 42
+    assert events[3][1]["text"].endswith("[1]")
+    assert events[4][1]["document"] == "操作系统课件"
+    assert events[4][1]["page"] == 42
 
     history = await client.get(
         f"/api/v1/chat/sessions/{chat_session['id']}/messages",
@@ -207,3 +215,123 @@ async def test_another_active_student_cannot_read_or_write_a_session(
         == denied_write.json()["error"]["code"]
         == "CHAT_SESSION_ACCESS_DENIED"
     )
+
+
+async def test_business_intents_execute_reviewed_learning_services(client, app_instance):
+    course, student, student_tokens = await _course_with_index(
+        client, app_instance, suffix="d"
+    )
+    course_id = uuid.UUID(course["id"])
+    async with app_instance.state.session_factory() as db:
+        index = await db.scalar(
+            select(CourseIndex).where(CourseIndex.course_id == course_id)
+        )
+        chunk = await db.scalar(
+            select(Chunk)
+            .join(DocumentVersion, DocumentVersion.id == Chunk.version_id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(Document.course_id == course_id)
+        )
+        concept = ConceptCandidate(
+            course_id=course_id,
+            index_id=index.id,
+            name="页面置换",
+            description="虚拟内存中的页面替换策略",
+            aliases=[],
+            source_chunk_id=chunk.id,
+            evidence=chunk.content,
+            extraction_model="test",
+            confidence=0.95,
+            status=ReviewStatus.APPROVED,
+        )
+        db.add(concept)
+        await db.flush()
+        db.add_all(
+            [
+                QuizItem(
+                    course_id=course_id,
+                    concept_id=concept.id,
+                    source_chunk_id=chunk.id,
+                    question="页面置换算法选择什么？",
+                    options=["换出的页面", "CPU 指令"],
+                    answer="换出的页面",
+                    explanation="课程资料明确说明选择换出的页面。",
+                    difficulty=QuizDifficulty.EASY,
+                    status=ReviewStatus.APPROVED,
+                    generation_model="test",
+                ),
+                MasteryState(
+                    course_id=course_id,
+                    student_id=uuid.UUID(student["id"]),
+                    concept_id=concept.id,
+                    alpha=1,
+                    beta=3,
+                    attempt_count=2,
+                ),
+            ]
+        )
+        await db.commit()
+        concept_id = concept.id
+
+    created = await client.post(
+        f"/api/v1/courses/{course['id']}/chat/sessions",
+        headers=auth_headers(student_tokens),
+    )
+    session_id = created.json()["data"]["id"]
+    cases = [
+        ("QUIZ", [], "页面置换算法选择什么"),
+        ("LEARNING_PATH", [str(concept_id)], "建议学习顺序"),
+        ("DIAGNOSE", [], "掌握度 25%"),
+    ]
+    for intent, target_ids, expected_text in cases:
+        sent = await client.post(
+            f"/api/v1/chat/sessions/{session_id}/messages",
+            headers=auth_headers(student_tokens),
+            json={
+                "content": "请执行学习动作",
+                "requested_intent": intent,
+                "target_concept_ids": target_ids,
+            },
+        )
+        tokens = "".join(
+            data["text"] for name, data in _events(sent) if name == "token"
+        )
+        assert expected_text in tokens, _events(sent)
+        assert "确定性业务处理器" not in tokens
+
+
+class _TwoClaimAdapter:
+    def generate(self, _prompt):
+        return AnswerDraft(
+            claims=[
+                ClaimDraft(text="虚拟内存使用页面置换算法。", citation_labels=[1]),
+                ClaimDraft(text="页面置换算法选择要换出的页面。", citation_labels=[1]),
+            ]
+        )
+
+
+async def test_history_preserves_all_claim_bindings_for_one_citation(
+    client, app_instance
+):
+    course, _, student_tokens = await _course_with_index(
+        client, app_instance, suffix="e"
+    )
+    app_instance.state.chat_adapter = _TwoClaimAdapter()
+    created = await client.post(
+        f"/api/v1/courses/{course['id']}/chat/sessions",
+        headers=auth_headers(student_tokens),
+    )
+    session_id = created.json()["data"]["id"]
+    sent = await client.post(
+        f"/api/v1/chat/sessions/{session_id}/messages",
+        headers=auth_headers(student_tokens),
+        json={"content": "页面置换算法有什么作用？"},
+    )
+    assert sent.status_code == 200
+    history = await client.get(
+        f"/api/v1/chat/sessions/{session_id}/messages",
+        headers=auth_headers(student_tokens),
+    )
+    citation = history.json()["data"][-1]["citations"][0]
+    assert citation["claim_index"] == 0
+    assert citation["claim_indices"] == [0, 1]

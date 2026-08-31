@@ -7,13 +7,17 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 
 from app.models import (
     Chunk,
     ConceptCandidate,
+    CourseIndex,
+    CourseIndexStatus,
     Document,
     DocumentVersion,
     DocumentVersionStatus,
+    IndexComponentStatus,
     RelationCandidate,
     RelationType,
     ReviewStatus,
@@ -87,11 +91,22 @@ async def _seed_material_and_concepts(
         )
         session.add(chunk)
         await session.flush()
+        course_index = CourseIndex(
+            course_id=uuid.UUID(course_id),
+            version=1,
+            dense_status=IndexComponentStatus.READY,
+            lexical_status=IndexComponentStatus.READY,
+            status=CourseIndexStatus.ACTIVE,
+            covered_document_version_ids=[str(version.id)],
+        )
+        session.add(course_index)
+        await session.flush()
         session.add_all(
             [
                 ConceptCandidate(
                     id=concept_id,
                     course_id=uuid.UUID(course_id),
+                    index_id=course_index.id,
                     name=f"Concept {index}",
                     description="Grounded concept",
                     source_chunk_id=chunk_id,
@@ -244,7 +259,6 @@ async def test_duplicate_attempt_replays_without_updating_mastery_twice(
     assert replay.json()["data"]["id"] == first.json()["data"]["id"]
     assert replay.json()["data"]["correct"] is True
     assert replay.json()["data"]["replayed"] is True
-
     mastery = await learning_client.get(
         f"/api/v1/courses/{course['id']}/mastery",
         headers=auth_headers(student),
@@ -252,6 +266,63 @@ async def test_duplicate_attempt_replays_without_updating_mastery_twice(
     assert mastery.status_code == 200
     assert mastery.json()["data"][0]["attempt_count"] == 1
     assert mastery.json()["data"][0]["alpha"] == pytest.approx(2.0)
+
+
+@pytest.mark.asyncio
+async def test_old_version_quiz_cannot_update_mastery_after_index_switch(
+    learning_client: httpx.AsyncClient, app_instance
+):
+    teacher, student, course = await _course_with_enrollment(learning_client)
+    chunk_id, (concept_id,) = await _seed_material_and_concepts(
+        app_instance, course["id"]
+    )
+    quiz = await _create_candidate(
+        learning_client, teacher, course["id"], chunk_id, concept_id
+    )
+    approved = await learning_client.post(
+        f"/api/v1/quizzes/{quiz['id']}/approve", headers=auth_headers(teacher)
+    )
+    assert approved.status_code == 200
+    before_switch = await learning_client.post(
+        f"/api/v1/quizzes/{quiz['id']}/attempts",
+        headers=auth_headers(student),
+        json={"answer": "LIFO", "idempotency_key": "before-switch"},
+    )
+    assert before_switch.status_code == 200
+    async with app_instance.state.session_factory() as session:
+        old_index = await session.scalar(
+            select(CourseIndex).where(
+                CourseIndex.course_id == uuid.UUID(course["id"]),
+                CourseIndex.status == CourseIndexStatus.ACTIVE,
+            )
+        )
+        old_index.status = CourseIndexStatus.ARCHIVED
+        session.add(
+            CourseIndex(
+                course_id=uuid.UUID(course["id"]),
+                version=2,
+                dense_status=IndexComponentStatus.READY,
+                lexical_status=IndexComponentStatus.READY,
+                status=CourseIndexStatus.ACTIVE,
+                covered_document_version_ids=[],
+            )
+        )
+        await session.commit()
+
+    attempted = await learning_client.post(
+        f"/api/v1/quizzes/{quiz['id']}/attempts",
+        headers=auth_headers(student),
+        json={"answer": "LIFO", "idempotency_key": "stale-version"},
+    )
+    assert attempted.status_code == 409
+    assert attempted.json()["error"]["code"] == "QUIZ_VERSION_STALE"
+
+    mastery = await learning_client.get(
+        f"/api/v1/courses/{course['id']}/mastery",
+        headers=auth_headers(student),
+    )
+    assert mastery.status_code == 200
+    assert mastery.json()["data"] == []
 
 
 @pytest.mark.asyncio

@@ -194,6 +194,7 @@ Student 不可以上传课程资料、审核图谱、创建题目或查看其他
 - 密码使用 Argon2id 哈希。
 - Access Token 有效期 30 分钟，Refresh Token 有效期 14 天。
 - Refresh Token 支持轮换和注销失效。
+- 浏览器端通过同源 BFF 使用 `Secure`、`HttpOnly`、`SameSite` Cookie；不得把 Access Token 或 Refresh Token 持久化到 `localStorage`。
 
 #### FR-COURSE-001 创建课程
 
@@ -621,7 +622,7 @@ data: {"code":"INSUFFICIENT_EVIDENCE","message":"课程资料中没有足够依�
 |---|---|---|
 | POST | `/api/v1/courses/{course_id}/eval-datasets` | 创建数据集 |
 | POST | `/api/v1/eval-datasets/{id}/freeze` | 冻结版本 |
-| POST | `/api/v1/eval-datasets/{id}/runs` | 启动评测 |
+| POST | `/api/v1/eval-datasets/{id}/runs` | 启动服务端真实三基线评测；请求只接受运行参数，不接受客户端提交的 Case 结果 |
 | GET | `/api/v1/eval-runs/{id}` | 查看进度和指标 |
 | POST | `/api/v1/bad-cases` | 标注Bad Case |
 | PATCH | `/api/v1/bad-cases/{id}` | 更新修复状态 |

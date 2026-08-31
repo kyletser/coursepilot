@@ -12,12 +12,10 @@ import {
 import {
   ApiError,
   apiRequest,
-  getStoredSession,
   jsonBody,
   publicApiRequest,
-  setStoredSession,
 } from "@/lib/api";
-import type { AuthTokens, User, UserRole } from "@/lib/types";
+import type { User, UserRole } from "@/lib/types";
 
 const AUTH_REJECTED = (error: unknown): boolean =>
   error instanceof ApiError && error.status === 401;
@@ -41,28 +39,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
 
   const syncCurrentUser = useCallback(async () => {
-    const current = getStoredSession();
-    if (!current) {
-      setUser(null);
-      setReady(true);
-      return null;
-    }
     try {
       const nextUser = await apiRequest<User>("/auth/me");
-      const refreshed = getStoredSession();
-      if (refreshed) {
-        setStoredSession({ ...refreshed, user: nextUser });
-      }
       setUser(nextUser);
       return nextUser;
     } catch (error) {
       if (AUTH_REJECTED(error)) {
-        setStoredSession(null);
         setUser(null);
       } else {
-        // Transient API/network failure: keep the stored tokens and fall back
-        // to the persisted user snapshot instead of logging the user out.
-        setUser(current.user ?? null);
+        setUser(null);
       }
       return null;
     } finally {
@@ -77,22 +62,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [syncCurrentUser]);
 
   const login = useCallback(async (email: string, password: string) => {
-    const tokens = await publicApiRequest<AuthTokens>("/auth/login", {
+    await publicApiRequest<{ authenticated: boolean }>("/auth/login", {
       method: "POST",
       ...jsonBody({ email, password }),
     });
-    setStoredSession({ tokens });
     try {
       const nextUser = await apiRequest<User>("/auth/me");
-      setStoredSession({ tokens: getStoredSession()?.tokens ?? tokens, user: nextUser });
       setUser(nextUser);
       return nextUser;
     } catch (error) {
       if (AUTH_REJECTED(error)) {
-        setStoredSession(null);
+        setUser(null);
       }
-      // Keep freshly issued tokens on transient failures; the next sync picks
-      // the profile up once the API is reachable again.
       setUser(null);
       throw error;
     }
@@ -110,16 +91,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const logout = useCallback(async () => {
-    const refreshToken = getStoredSession()?.tokens.refresh_token;
     try {
-      if (refreshToken) {
-        await apiRequest<{ revoked: boolean }>("/auth/logout", {
-          method: "POST",
-          ...jsonBody({ refresh_token: refreshToken }),
-        });
-      }
+      await apiRequest<{ revoked: boolean }>("/auth/logout", {
+        method: "POST",
+        ...jsonBody({}),
+      });
     } finally {
-      setStoredSession(null);
       setUser(null);
     }
   }, []);

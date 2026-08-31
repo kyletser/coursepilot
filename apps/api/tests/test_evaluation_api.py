@@ -71,27 +71,9 @@ async def _freeze_and_run(
     run = await client.post(
         f"/api/v1/eval-datasets/{dataset_id}/runs",
         headers=auth_headers(tokens),
-        json={
-            "config": {
-                "git_commit": "0123456789abcdef",
-                "index_version": 1,
-                "model_versions": {
-                    "embedding": "BAAI/bge-m3",
-                    "reranker": "BAAI/bge-reranker-v2-m3",
-                },
-                "prompt_version": "retrieval-v1",
-                "retrieval_parameters": {"top_k": 10},
-                "hardware": {"cpu": "test"},
-                "experiment": "hybrid_rerank",
-            },
-            "case_results": {
-                "stack-definition": {
-                    "ranked_chunk_ids": ["chunk-1", "noise", "chunk-2"]
-                }
-            },
-        },
+        json={"index_version": 1, "prompt_version": "retrieval-v1"},
     )
-    assert run.status_code == 201, run.text
+    assert run.status_code == 202, run.text
     return run.json()["data"]
 
 
@@ -144,7 +126,9 @@ async def test_dataset_owner_can_build_and_freeze_but_not_mutate(client):
     assert student_denied.status_code == 403
 
 
-async def test_run_persists_versioned_config_and_measured_metrics(client, app_instance):
+async def test_run_queues_server_execution_without_client_measured_metrics(
+    client, app_instance
+):
     _, tokens = await register_and_login(
         client, "run-owner@example.com", role="TEACHER"
     )
@@ -154,19 +138,16 @@ async def test_run_persists_versioned_config_and_measured_metrics(client, app_in
         client, app_instance, tokens, course["id"], dataset["id"]
     )
 
-    assert run["status"] == "SUCCEEDED"
-    assert run["metrics"]["schema_version"] == "coursepilot.eval-metrics/1.0.0"
-    assert run["metrics"]["retrieval"]["recall_at_5"] == 1.0
-    assert run["metrics"]["retrieval"]["mrr_at_5"] == 1.0
-    assert run["config"]["dataset_version"] == 1
-    assert run["config"]["experiment"] == "hybrid_rerank"
-    assert len(run["config"]["dataset"]["content_sha256"]) == 64
+    assert run["status"] == "QUEUED"
+    assert run["metrics"] is None
+    assert run["config"]["execution"] == "SERVER_THREE_BASELINE_RUNNER"
+    assert run["config"]["launch"]["index_version"] == 1
 
     fetched = await client.get(
         f"/api/v1/eval-runs/{run['id']}", headers=auth_headers(tokens)
     )
     assert fetched.status_code == 200
-    assert fetched.json()["data"]["metrics"] == run["metrics"]
+    assert fetched.json()["data"]["metrics"] is None
     async with app_instance.state.session_factory() as session:
         stored = await session.scalar(
             select(EvalRun).where(EvalRun.id == uuid.UUID(run["id"]))
@@ -174,6 +155,18 @@ async def test_run_persists_versioned_config_and_measured_metrics(client, app_in
         assert stored is not None
         assert stored.config == run["config"]
         assert stored.metrics == run["metrics"]
+
+    forged = await client.post(
+        f"/api/v1/eval-datasets/{dataset['id']}/runs",
+        headers=auth_headers(tokens),
+        json={
+            "index_version": 1,
+            "case_results": {
+                "stack-definition": {"ranked_chunk_ids": ["fabricated"]}
+            },
+        },
+    )
+    assert forged.status_code == 422
 
 
 async def test_bad_case_source_and_updates_are_course_owner_scoped(

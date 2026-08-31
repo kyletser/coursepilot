@@ -11,15 +11,20 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import AppError
+from app.learning.service import LearningService
 from app.models import (
     Chunk,
+    ConceptCandidate,
     CourseIndex,
     Document,
     DocumentStatus,
     DocumentVersion,
     DocumentVersionStatus,
     IndexComponentStatus,
+    MasteryState,
     RecordStatus,
+    ReviewStatus,
 )
 from app.retrieval import (
     FusedCandidate,
@@ -32,7 +37,15 @@ from app.retrieval import (
 )
 
 from .core import ChatAdapter, TrustedAgentCore
-from .schemas import AgentRequest, AgentResponse, Evidence, Intent
+from .schemas import (
+    AgentRequest,
+    AgentResponse,
+    AgentStatus,
+    BudgetSnapshot,
+    Evidence,
+    Intent,
+    IntentRoute,
+)
 
 
 async def _invoke(method: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -278,6 +291,22 @@ class CourseMaterialEvidenceRetriever:
         if not ordered:
             return []
 
+        covered_version_ids = frozenset(
+            uuid.UUID(str(value))
+            for value in (
+                await self.session.scalar(
+                    select(CourseIndex.covered_document_version_ids).where(
+                        CourseIndex.course_id == self.course_id,
+                        CourseIndex.version == self.index_version,
+                        CourseIndex.deleted_at.is_(None),
+                    )
+                )
+                or ()
+            )
+        )
+        if not covered_version_ids:
+            return []
+
         rows = (
             await self.session.execute(
                 select(Chunk, DocumentVersion, Document)
@@ -288,6 +317,7 @@ class CourseMaterialEvidenceRetriever:
                     Document.course_id == self.course_id,
                     Document.status == DocumentStatus.ACTIVE,
                     DocumentVersion.status == DocumentVersionStatus.PUBLISHED,
+                    DocumentVersion.id.in_(covered_version_ids),
                     Chunk.status == RecordStatus.ACTIVE,
                     Chunk.deleted_at.is_(None),
                     DocumentVersion.deleted_at.is_(None),
@@ -373,6 +403,195 @@ class CourseMaterialEvidenceRetriever:
         return 0.0
 
 
+class CourseLearningBusinessHandler:
+    """Execute deterministic student-learning intents against reviewed data."""
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        course_id: uuid.UUID,
+        student_id: uuid.UUID,
+    ) -> None:
+        self.session = session
+        self.course_id = course_id
+        self.student_id = student_id
+        self.learning = LearningService()
+
+    @staticmethod
+    def _response(**values: Any) -> AgentResponse:
+        # TrustedAgentCore replaces this intermediate snapshot with the real
+        # turn budget before returning the response.
+        return AgentResponse(
+            budget=BudgetSnapshot(
+                query_rewrites=0,
+                tool_calls=0,
+                steps=0,
+                max_query_rewrites=0,
+                max_tool_calls=0,
+                max_steps=0,
+            ),
+            **values,
+        )
+
+    async def handle(
+        self, *, request: AgentRequest, route: IntentRoute
+    ) -> AgentResponse | None:
+        if route.intent == Intent.QUIZ:
+            return await self._quiz(route)
+        if route.intent == Intent.LEARNING_PATH:
+            return await self._learning_path(route)
+        if route.intent == Intent.DIAGNOSE:
+            return await self._diagnose(route)
+        return None
+
+    async def _student(self):
+        from app.models import User
+
+        student = await self.session.get(User, self.student_id)
+        if student is None:
+            raise PermissionError("student does not exist")
+        return student
+
+    @staticmethod
+    def _target_id(route: IntentRoute) -> uuid.UUID | None:
+        for value in route.target_concepts:
+            try:
+                return uuid.UUID(value)
+            except ValueError:
+                continue
+        return None
+
+    async def _quiz(self, route: IntentRoute) -> AgentResponse:
+        try:
+            quiz = await self.learning.next_quiz(
+                self.session,
+                self.course_id,
+                await self._student(),
+                concept_id=self._target_id(route),
+            )
+        except AppError as exc:
+            code = getattr(exc, "code", "QUIZ_UNAVAILABLE")
+            return self._response(
+                status=AgentStatus.ROUTED,
+                route=route,
+                answer="当前没有符合条件的已审核题目。",
+                error_code=code,
+                error_message="当前没有符合条件的已审核题目。",
+            )
+        options = "\n".join(
+            f"{chr(65 + index)}. {option}" for index, option in enumerate(quiz.options)
+        )
+        return self._response(
+            status=AgentStatus.ROUTED,
+            route=route,
+            answer=f"练习题：{quiz.question}\n{options}",
+            warnings=[f"QUIZ_ITEM_ID:{quiz.id}"],
+        )
+
+    async def _active_concepts(self) -> list[ConceptCandidate]:
+        index = await self.learning._active_index(self.session, self.course_id)
+        return list(
+            (
+                await self.session.scalars(
+                    select(ConceptCandidate)
+                    .where(
+                        ConceptCandidate.course_id == self.course_id,
+                        ConceptCandidate.index_id == index.id,
+                        ConceptCandidate.status == ReviewStatus.APPROVED,
+                        ConceptCandidate.deleted_at.is_(None),
+                    )
+                    .order_by(ConceptCandidate.name, ConceptCandidate.id)
+                )
+            ).all()
+        )
+
+    async def _mastery(self) -> dict[uuid.UUID, MasteryState]:
+        rows = (
+            await self.session.scalars(
+                select(MasteryState).where(
+                    MasteryState.course_id == self.course_id,
+                    MasteryState.student_id == self.student_id,
+                    MasteryState.status == RecordStatus.ACTIVE,
+                )
+            )
+        ).all()
+        return {row.concept_id: row for row in rows}
+
+    async def _learning_path(self, route: IntentRoute) -> AgentResponse:
+        concepts = await self._active_concepts()
+        if not concepts:
+            return self._response(
+                status=AgentStatus.ROUTED,
+                route=route,
+                answer="当前课程还没有可用于生成学习路径的已审核知识点。",
+                error_code="LEARNING_PATH_UNAVAILABLE",
+                error_message="当前课程还没有可用于生成学习路径的已审核知识点。",
+            )
+        target_id = self._target_id(route)
+        if target_id is None:
+            mastery = await self._mastery()
+            target_id = min(
+                concepts,
+                key=lambda item: (
+                    mastery.get(item.id).mastery if item.id in mastery else 0.5,
+                    item.name,
+                ),
+            ).id
+        try:
+            result = await self.learning.learning_path(
+                self.session,
+                self.course_id,
+                await self._student(),
+                target_concept_id=target_id,
+                max_depth=4,
+            )
+        except AppError as exc:
+            code = getattr(exc, "code", "LEARNING_PATH_UNAVAILABLE")
+            return self._response(
+                status=AgentStatus.ROUTED,
+                route=route,
+                answer="暂时无法为该知识点生成学习路径。",
+                error_code=code,
+                error_message="暂时无法为该知识点生成学习路径。",
+            )
+        lines = [
+            f"{position}. {step.concept.name}（掌握度 {step.mastery:.0%}）"
+            for position, step in enumerate(result.steps, start=1)
+        ]
+        return self._response(
+            status=AgentStatus.ROUTED,
+            route=route,
+            answer="建议学习顺序：\n" + "\n".join(lines),
+        )
+
+    async def _diagnose(self, route: IntentRoute) -> AgentResponse:
+        concepts = await self._active_concepts()
+        mastery = await self._mastery()
+        assessed = [
+            (concept, mastery[concept.id])
+            for concept in concepts
+            if concept.id in mastery and mastery[concept.id].attempt_count > 0
+        ]
+        if not assessed:
+            return self._response(
+                status=AgentStatus.ROUTED,
+                route=route,
+                answer="目前还没有有效的已审核题目作答记录，完成练习后才能诊断薄弱点。",
+            )
+        weakest = sorted(assessed, key=lambda item: (item[1].mastery, item[0].name))[:3]
+        lines = [
+            f"{position}. {concept.name}：掌握度 {state.mastery:.0%}，"
+            f"有效作答 {state.attempt_count} 次"
+            for position, (concept, state) in enumerate(weakest, start=1)
+        ]
+        return self._response(
+            status=AgentStatus.ROUTED,
+            route=route,
+            answer="当前优先复习的薄弱知识点：\n" + "\n".join(lines),
+        )
+
+
 def build_retrieval_backend(
     app_state: Any,
     session: AsyncSession,
@@ -437,6 +656,11 @@ async def run_trusted_turn(
     core = TrustedAgentCore(
         retriever=evidence_retriever,
         chat_adapter=chat_adapter,
+        business_handler=CourseLearningBusinessHandler(
+            session,
+            course_id=course_id,
+            student_id=student_id,
+        ),
     )
     response = await core.run(
         AgentRequest(

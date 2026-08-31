@@ -27,6 +27,8 @@ from app.models import (
     Chunk,
     ConceptCandidate,
     Course,
+    CourseIndex,
+    CourseIndexStatus,
     CourseStatus,
     Document,
     DocumentStatus,
@@ -91,6 +93,18 @@ class LearningPathResult:
 
 class LearningService:
     """Transactional quiz and deterministic learning-path application service."""
+
+    async def _active_index(self, session: AsyncSession, course_id: uuid.UUID) -> CourseIndex:
+        index = await session.scalar(
+            select(CourseIndex).where(
+                CourseIndex.course_id == course_id,
+                CourseIndex.status == CourseIndexStatus.ACTIVE,
+                CourseIndex.deleted_at.is_(None),
+            )
+        )
+        if index is None:
+            raise AppError(409, "ACTIVE_INDEX_REQUIRED", "The course has no active index")
+        return index
 
     async def require_owner_course(
         self,
@@ -367,6 +381,11 @@ class LearningService:
         difficulty: QuizDifficulty | None = None,
     ) -> QuizItem:
         await self.require_active_enrollment(session, course_id, student)
+        active_index = await self._active_index(session, course_id)
+        covered_versions = {
+            uuid.UUID(str(value))
+            for value in (active_index.covered_document_version_ids or ())
+        }
         previously_attempted = exists(
             select(QuizAttempt.id).where(
                 QuizAttempt.student_id == student.id,
@@ -380,11 +399,15 @@ class LearningService:
                 ConceptCandidate,
                 ConceptCandidate.id == QuizItem.concept_id,
             )
+            .join(Chunk, Chunk.id == QuizItem.source_chunk_id)
             .where(
                 QuizItem.course_id == course_id,
                 QuizItem.status == ReviewStatus.APPROVED,
                 ConceptCandidate.course_id == course_id,
                 ConceptCandidate.status == ReviewStatus.APPROVED,
+                ConceptCandidate.index_id == active_index.id,
+                Chunk.version_id.in_(covered_versions),
+                Chunk.status == RecordStatus.ACTIVE,
             )
         )
         if concept_id is not None:
@@ -422,6 +445,43 @@ class LearningService:
         if quiz is None:
             raise AppError(404, "QUIZ_NOT_FOUND", "Quiz item not found")
         await self.require_active_enrollment(session, quiz.course_id, student)
+        active_index = await self._active_index(session, quiz.course_id)
+        current_concept = await session.scalar(
+            select(ConceptCandidate.id).where(
+                ConceptCandidate.id == quiz.concept_id,
+                ConceptCandidate.course_id == quiz.course_id,
+                ConceptCandidate.index_id == active_index.id,
+                ConceptCandidate.status == ReviewStatus.APPROVED,
+            )
+        )
+        covered_versions = {
+            uuid.UUID(str(value))
+            for value in (active_index.covered_document_version_ids or ())
+        }
+        current_source = await session.scalar(
+            select(Chunk.id).where(
+                Chunk.id == quiz.source_chunk_id,
+                Chunk.version_id.in_(covered_versions),
+                Chunk.status == RecordStatus.ACTIVE,
+            )
+        )
+        if current_concept is None or current_source is None:
+            raise AppError(
+                409,
+                "QUIZ_VERSION_STALE",
+                "The quiz does not belong to the active course version",
+            )
+
+        # Different quiz rows can still update the same concept. Lock the
+        # concept as the shared serialization point before reading mastery.
+        await session.scalar(
+            select(ConceptCandidate.id)
+            .where(
+                ConceptCandidate.id == quiz.concept_id,
+                ConceptCandidate.course_id == quiz.course_id,
+            )
+            .with_for_update()
+        )
 
         existing = await session.scalar(
             select(QuizAttempt).where(
@@ -546,6 +606,7 @@ class LearningService:
         student: User,
     ) -> tuple[tuple[DBMasteryState, ConceptCandidate], ...]:
         await self.require_active_enrollment(session, course_id, student)
+        active_index = await self._active_index(session, course_id)
         rows = (
             await session.execute(
                 select(DBMasteryState, ConceptCandidate)
@@ -559,6 +620,7 @@ class LearningService:
                     DBMasteryState.status == RecordStatus.ACTIVE,
                     ConceptCandidate.course_id == course_id,
                     ConceptCandidate.status == ReviewStatus.APPROVED,
+                    ConceptCandidate.index_id == active_index.id,
                 )
                 .order_by(ConceptCandidate.name.asc(), ConceptCandidate.id.asc())
             )
@@ -575,10 +637,12 @@ class LearningService:
         max_depth: int,
     ) -> LearningPathResult:
         await self.require_active_enrollment(session, course_id, student)
+        active_index = await self._active_index(session, course_id)
         target = await session.scalar(
             select(ConceptCandidate).where(
                 ConceptCandidate.id == target_concept_id,
                 ConceptCandidate.course_id == course_id,
+                ConceptCandidate.index_id == active_index.id,
             )
         )
         if target is None:
@@ -593,7 +657,10 @@ class LearningService:
             (
                 await session.scalars(
                     select(ConceptCandidate)
-                    .where(ConceptCandidate.course_id == course_id)
+                    .where(
+                        ConceptCandidate.course_id == course_id,
+                        ConceptCandidate.index_id == active_index.id,
+                    )
                     .order_by(
                         ConceptCandidate.created_at.asc(), ConceptCandidate.id.asc()
                     )
@@ -604,10 +671,28 @@ class LearningService:
             (
                 await session.scalars(
                     select(RelationCandidate)
+                    .join(Chunk, Chunk.id == RelationCandidate.source_chunk_id)
                     .where(
                         RelationCandidate.course_id == course_id,
                         RelationCandidate.type == RelationType.PREREQUISITE_OF,
                         RelationCandidate.status == ReviewStatus.APPROVED,
+                        Chunk.version_id.in_(
+                            uuid.UUID(str(value))
+                            for value in (
+                                active_index.covered_document_version_ids or ()
+                            )
+                        ),
+                        Chunk.status == RecordStatus.ACTIVE,
+                        RelationCandidate.from_candidate_id.in_(
+                            select(ConceptCandidate.id).where(
+                                ConceptCandidate.index_id == active_index.id
+                            )
+                        ),
+                        RelationCandidate.to_candidate_id.in_(
+                            select(ConceptCandidate.id).where(
+                                ConceptCandidate.index_id == active_index.id
+                            )
+                        ),
                     )
                     .order_by(
                         RelationCandidate.created_at.asc(),
@@ -715,6 +800,22 @@ class LearningService:
                 "QUIZ_CONCEPT_NOT_APPROVED",
                 "The quiz concept is not teacher-approved",
             )
+        candidate_index = await session.scalar(
+            select(CourseIndex).where(
+                CourseIndex.id == concept.index_id,
+                CourseIndex.course_id == quiz.course_id,
+                CourseIndex.status.in_(
+                    {CourseIndexStatus.READY, CourseIndexStatus.ACTIVE}
+                ),
+                CourseIndex.deleted_at.is_(None),
+            )
+        )
+        if candidate_index is None:
+            raise AppError(
+                409,
+                "QUIZ_INDEX_NOT_READY",
+                "The quiz concept index is not ready for review",
+            )
         source_id = await session.scalar(
             select(Chunk.id)
             .join(DocumentVersion, DocumentVersion.id == Chunk.version_id)
@@ -723,6 +824,10 @@ class LearningService:
                 Chunk.id == quiz.source_chunk_id,
                 Chunk.status == RecordStatus.ACTIVE,
                 DocumentVersion.status == DocumentVersionStatus.PUBLISHED,
+                DocumentVersion.id.in_(
+                    uuid.UUID(str(value))
+                    for value in (candidate_index.covered_document_version_ids or ())
+                ),
                 Document.status == DocumentStatus.ACTIVE,
                 Document.course_id == quiz.course_id,
             )

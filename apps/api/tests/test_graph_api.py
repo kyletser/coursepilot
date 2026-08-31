@@ -149,13 +149,40 @@ async def test_graph_permissions_and_student_view_never_leaks_pending(
         json={"invite_code": course["invite_code"]},
     )
     _, _, chunk_id = await _seed_material(app_instance, course_id)
+    async with app_instance.state.session_factory() as session:
+        version_id = await session.scalar(
+            select(Chunk.version_id).where(Chunk.id == chunk_id)
+        )
+        active_index = CourseIndex(
+            course_id=course_id,
+            version=1,
+            dense_status=IndexComponentStatus.READY,
+            lexical_status=IndexComponentStatus.READY,
+            status=CourseIndexStatus.ACTIVE,
+            covered_document_version_ids=[str(version_id)],
+        )
+        session.add(active_index)
+        await session.commit()
+        active_index_id = active_index.id
     stack_id = await _add_concept(
-        app_instance, course_id, chunk_id, "Stack", status=ReviewStatus.APPROVED
+        app_instance,
+        course_id,
+        chunk_id,
+        "Stack",
+        status=ReviewStatus.APPROVED,
+        index_id=active_index_id,
     )
     queue_id = await _add_concept(
-        app_instance, course_id, chunk_id, "Queue", status=ReviewStatus.APPROVED
+        app_instance,
+        course_id,
+        chunk_id,
+        "Queue",
+        status=ReviewStatus.APPROVED,
+        index_id=active_index_id,
     )
-    pending_id = await _add_concept(app_instance, course_id, chunk_id, "Pending secret")
+    pending_id = await _add_concept(
+        app_instance, course_id, chunk_id, "Pending secret", index_id=active_index_id
+    )
     approved_relation_id = await _add_relation(
         app_instance,
         course_id,
