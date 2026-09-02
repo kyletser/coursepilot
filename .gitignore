@@ -33,6 +33,7 @@ package-lock.json
 yarn.lock
 
 # Runtime data and local model/index artifacts
+.codegraph/
 data/
 uploads/
 indexes/
