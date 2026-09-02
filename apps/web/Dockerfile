@@ -18,7 +18,7 @@ COPY --from=dependencies /workspace/node_modules ./node_modules
 COPY --from=dependencies /workspace/apps/web/node_modules ./apps/web/node_modules
 COPY apps/web ./apps/web
 WORKDIR /workspace/apps/web
-RUN pnpm build
+RUN node node_modules/next/dist/bin/next build
 
 FROM node:24-alpine AS runner
 WORKDIR /app
