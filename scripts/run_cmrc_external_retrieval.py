@@ -168,23 +168,26 @@ class _MemoryLexicalRetriever:
 async def _run(args: argparse.Namespace) -> Path:
     if not 2 <= args.sample_count <= 500:
         raise ValueError("sample-count must be between 2 and 500")
+    if not args.sample_count <= args.candidate_count <= 1000:
+        raise ValueError("candidate-count must be between sample-count and 1000")
     source = args.source.resolve()
     commit, dirty = _git_provenance(allow_dirty=args.allow_dirty)
-    cases = _load_cases(source, args.sample_count)
+    corpus_cases = _load_cases(source, args.candidate_count)
+    evaluation_cases = corpus_cases[: args.sample_count]
     settings = get_settings()
     embedding = BGEM3EmbeddingAdapter(
         settings.embedding_model,
         allow_download=settings.model_allow_download,
         cache_folder=settings.hf_hub_cache,
     )
-    contexts = [case.context for case in cases]
+    contexts = [case.context for case in corpus_cases]
     build_started = time.perf_counter()
     vectors = await embedding.embed_documents(contexts)
-    dense = _MemoryDenseRetriever(cases, vectors)
+    dense = _MemoryDenseRetriever(corpus_cases, vectors)
     dense.embedding = embedding
     lexical = _MemoryLexicalRetriever(
         LightweightBM25Index(
-            LexicalDocument(case.context_id, case.context) for case in cases
+            LexicalDocument(case.context_id, case.context) for case in corpus_cases
         )
     )
     reranker = BGERerankerAdapter(
@@ -210,7 +213,7 @@ async def _run(args: argparse.Namespace) -> Path:
         started = time.perf_counter()
         case_results: dict[str, Any] = {}
         metric_cases: list[RetrievalCase] = []
-        for case in cases:
+        for case in evaluation_cases:
             result = await retriever.retrieve(
                 course_id="cmrc2018-external",
                 index_version=args.source_commit,
@@ -234,7 +237,7 @@ async def _run(args: argparse.Namespace) -> Path:
                 "mode": mode,
                 "metrics": evaluate_retrieval(metric_cases).to_dict(),
                 "duration_ms": round(duration_ms, 3),
-                "latency_ms_per_query": round(duration_ms / len(cases), 3),
+                "latency_ms_per_query": round(duration_ms / len(evaluation_cases), 3),
                 "case_results": case_results,
             }
         )
@@ -250,7 +253,10 @@ async def _run(args: argparse.Namespace) -> Path:
             "source_file": source.name,
             "source_sha256": _source_sha256(source),
             "license": UPSTREAM_LICENSE,
-            "selection": "sort context_id ascending; first QA from first N usable contexts",
+            "selection": (
+                "sort context_id ascending; first QA from first sample_count usable "
+                "contexts; retrieve against first candidate_count usable contexts"
+            ),
         },
         "models": {
             "embedding": settings.embedding_model,
@@ -262,7 +268,10 @@ async def _run(args: argparse.Namespace) -> Path:
             "processor": platform.processor(),
             "python": platform.python_version(),
         },
-        "dataset": {"sample_count": len(cases), "candidate_passage_count": len(cases)},
+        "dataset": {
+            "sample_count": len(evaluation_cases),
+            "candidate_passage_count": len(corpus_cases),
+        },
         "index_build_ms": round(build_ms, 3),
         "baselines": outputs,
     }
@@ -278,6 +287,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--sample-count", type=int, default=50)
+    parser.add_argument("--candidate-count", type=int, default=200)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--allow-dirty", action="store_true")
     return parser.parse_args()
