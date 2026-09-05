@@ -40,6 +40,18 @@ EXPECTED_COUNTS = {
     EvalDatasetType.INTENT_ROUTING: 25,
     EvalDatasetType.LEARNING_PATH: 15,
 }
+TYPE_ORDER = {
+    EvalDatasetType.INTENT_ROUTING: 0,
+    EvalDatasetType.LEARNING_PATH: 1,
+    EvalDatasetType.RETRIEVAL: 2,
+    EvalDatasetType.END_TO_END_QA: 3,
+}
+OPTIMIZED_RETRIEVAL = {
+    "route_top_k": 10,
+    "fusion_top_k": 8,
+    "final_top_k": 5,
+    "reranker_timeout_seconds": 15.0,
+}
 
 
 def _require_clean_worktree() -> str:
@@ -83,7 +95,7 @@ async def run(args: argparse.Namespace) -> None:
                         CourseIndex.course_id == Course.id,
                     )
                     .where(
-                        EvalDataset.name.like("内部正式-%-v2"),
+                        EvalDataset.name.like("内部正式-%-v3"),
                         EvalDataset.status == EvalDatasetStatus.FROZEN,
                         CourseIndex.status == CourseIndexStatus.ACTIVE,
                         EvalDataset.deleted_at.is_(None),
@@ -102,12 +114,13 @@ async def run(args: argparse.Namespace) -> None:
             raise RuntimeError(
                 f"Expected 8 frozen internal datasets, found {len(selected)}"
             )
+        selected.sort(key=lambda item: (item[1].code, TYPE_ORDER[item[0].type]))
 
         results: list[dict[str, object]] = []
         for dataset, course, course_index in selected:
             expected_count = EXPECTED_COUNTS[dataset.type]
             report_version = (
-                f"internal-v2-{course.code.lower()}-{dataset.type.value.lower()}"
+                f"internal-v3-{course.code.lower()}-{dataset.type.value.lower()}"
             )
             common = {
                 "session_factory": session_factory,
@@ -123,9 +136,11 @@ async def run(args: argparse.Namespace) -> None:
                 f"Running {course.code} {dataset.type.value} ({expected_count} cases)..."
             )
             if dataset.type == EvalDatasetType.RETRIEVAL:
-                result = await run_three_baselines(**common)
+                result = await run_three_baselines(**common, **OPTIMIZED_RETRIEVAL)
             elif dataset.type == EvalDatasetType.END_TO_END_QA:
-                result = await run_end_to_end_qa_evaluation(**common)
+                result = await run_end_to_end_qa_evaluation(
+                    **common, **OPTIMIZED_RETRIEVAL
+                )
             elif dataset.type == EvalDatasetType.INTENT_ROUTING:
                 result = await run_intent_routing_evaluation(**common)
             elif dataset.type == EvalDatasetType.LEARNING_PATH:

@@ -60,6 +60,7 @@ def evidence_record(
         ("解释什么是虚拟内存", Intent.TUTOR_QA),
         ("比较分页和分段的区别", Intent.CONCEPT_COMPARE),
         ("诊断一下我缺少哪些前置知识", Intent.DIAGNOSE),
+        ("为什么我学不会二叉树？", Intent.DIAGNOSE),
         ("给我出几道练习题", Intent.QUIZ),
         ("请制定学习路径，然后安排一次测验", Intent.LEARNING_PATH),
     ],

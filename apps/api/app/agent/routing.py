@@ -34,7 +34,7 @@ _INTENT_RULES: tuple[tuple[Intent, tuple[re.Pattern[str], ...]], ...] = (
     (
         Intent.DIAGNOSE,
         (
-            re.compile(r"(?:诊断|薄弱|知识缺口|前置知识|哪里不会|为什么学不会)"),
+            re.compile(r"(?:诊断|薄弱|知识缺口|前置知识|哪里不会|学不会)"),
             re.compile(
                 r"\b(?:diagnos|knowledge gap|prerequisite|weakness)\w*\b",
                 re.IGNORECASE,

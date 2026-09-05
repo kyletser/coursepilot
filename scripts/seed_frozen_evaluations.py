@@ -17,7 +17,7 @@ from typing import Any
 
 from seed_demo import ApiClient, SeedError, ensure_account
 
-DATASET_VERSION = 2
+DATASET_VERSION = 3
 STUDENT_EMAIL = "demo-student@example.com"
 STUDENT_PASSWORD = "CoursePilot-demo-student-2026!"
 
@@ -650,6 +650,11 @@ def _cases(
     paths = []
     for index, (target_name, max_depth) in enumerate(spec.path_targets, start=1):
         target_id = str(concepts[target_name]["id"])
+        teacher_path = _teacher_path(target_id, edges, max_depth=max_depth)
+        in_scope = set(teacher_path)
+        scoped_edges = [
+            edge for edge in edges if edge[0] in in_scope and edge[1] in in_scope
+        ]
         paths.append(
             {
                 "case_key": f"path-{index:02d}",
@@ -659,10 +664,8 @@ def _cases(
                     "max_depth": max_depth,
                 },
                 "expected": {
-                    "approved_prerequisite_edges": edges,
-                    "teacher_concept_ids": _teacher_path(
-                        target_id, edges, max_depth=max_depth
-                    ),
+                    "approved_prerequisite_edges": scoped_edges,
+                    "teacher_concept_ids": teacher_path,
                 },
                 "labels": {"target_concept": target_name},
             }

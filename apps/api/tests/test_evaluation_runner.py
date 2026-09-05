@@ -50,8 +50,10 @@ class FakeDense:
     def __init__(self, noise: Chunk, target: Chunk) -> None:
         self.noise = noise
         self.target = target
+        self.calls = 0
 
     async def search(self, **_kwargs):
+        self.calls += 1
         return [
             DenseCandidate(str(self.noise.id), 0.9, content="noise"),
             DenseCandidate(str(self.target.id), 0.8, content="target"),
@@ -62,8 +64,10 @@ class FakeLexical:
     def __init__(self, noise: Chunk, target: Chunk) -> None:
         self.noise = noise
         self.target = target
+        self.calls = 0
 
     async def search(self, **_kwargs):
+        self.calls += 1
         return [
             LexicalCandidate(str(self.noise.id), 3.0, content="noise"),
             LexicalCandidate(str(self.target.id), 2.0, content="target"),
@@ -71,7 +75,11 @@ class FakeLexical:
 
 
 class FakeReranker:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def score(self, _query, documents):
+        self.calls += 1
         return [0.9 if document == "noise" else 0.1 for document in documents]
 
 
@@ -80,13 +88,16 @@ class FakeProviderFactory(EvaluationProviderFactory):
         self.noise = noise
         self.target = target
         self.calls = 0
+        self.dense = FakeDense(self.noise, self.target)
+        self.lexical = FakeLexical(self.noise, self.target)
+        self.reranker = FakeReranker()
 
     def build(self, **_kwargs) -> EvaluationProviders:
         self.calls += 1
         return EvaluationProviders(
-            dense=FakeDense(self.noise, self.target),
-            lexical=FakeLexical(self.noise, self.target),
-            reranker=FakeReranker(),
+            dense=self.dense,
+            lexical=self.lexical,
+            reranker=self.reranker,
             model_versions={
                 "embedding": "fake-embedding-v1",
                 "reranker": "fake-reranker-v1",
@@ -286,6 +297,11 @@ async def test_runner_executes_and_persists_three_real_rankings(app_instance, tm
     assert personalized["ranked_chunk_ids"][0] == str(target_id)
     assert personalized["personalization_trace"]["mastery_states_used"]
     assert personalized["personalization_trace"]["approved_relation_ids_used"]
+    assert personalized["base_retrieval_reused"] is True
+    assert by_mode["kg_personalized"]["base_retrieval_reused"] is True
+    assert factory.dense.calls == 2
+    assert factory.lexical.calls == 1
+    assert factory.reranker.calls == 1
     assert by_mode["dense_only"]["metrics"]["retrieval"]["mrr_at_5"] == 0.5
     assert by_mode["kg_personalized"]["metrics"]["retrieval"]["mrr_at_5"] == 1.0
 

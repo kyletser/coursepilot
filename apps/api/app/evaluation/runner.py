@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import math
 import os
@@ -946,6 +947,7 @@ async def run_three_baselines(
         )
         baselines: list[dict[str, Any]] = []
         run_ids: dict[str, uuid.UUID] = {}
+        hybrid_outputs: dict[str, dict[str, Any]] = {}
         for mode in BASELINE_MODES:
             retriever = HybridRetriever(
                 dense=providers.dense,
@@ -957,26 +959,34 @@ async def run_three_baselines(
             started = time.perf_counter()
             for case in cases:
                 query = _case_query(case)
-                result = await retriever.retrieve(
-                    course_id=str(dataset.course_id),
-                    index_version=str(index_version),
-                    query=query,
-                    top_k=final_top_k,
-                    trace_id=str(uuid.uuid4()),
-                )
-                trace = result.trace.to_dict()
-                _validate_trace(mode, trace)
-                ranked = await _authoritative_chunk_ids(
-                    session,
-                    course_index=course_index,
-                    candidate_ids=[
-                        candidate.chunk_id for candidate in result.candidates
-                    ],
-                )
+                if mode == "kg_personalized":
+                    cached = hybrid_outputs[case.case_key]
+                    trace = copy.deepcopy(cached["retrieval_trace"])
+                    ranked = list(cached["ranked_chunk_ids"])
+                    _validate_trace(mode, trace)
+                else:
+                    result = await retriever.retrieve(
+                        course_id=str(dataset.course_id),
+                        index_version=str(index_version),
+                        query=query,
+                        top_k=final_top_k,
+                        trace_id=str(uuid.uuid4()),
+                    )
+                    trace = result.trace.to_dict()
+                    _validate_trace(mode, trace)
+                    ranked = await _authoritative_chunk_ids(
+                        session,
+                        course_index=course_index,
+                        candidate_ids=[
+                            candidate.chunk_id for candidate in result.candidates
+                        ],
+                    )
                 output: dict[str, Any] = {
                     "ranked_chunk_ids": ranked,
                     "retrieval_trace": trace,
                 }
+                if mode == "hybrid_rerank":
+                    hybrid_outputs[case.case_key] = copy.deepcopy(output)
                 if mode == "kg_personalized":
                     ranked, personalization_trace = await _personalize(
                         session,
@@ -989,9 +999,23 @@ async def run_three_baselines(
                     )
                     output["ranked_chunk_ids"] = ranked
                     output["personalization_trace"] = personalization_trace
+                    output["base_retrieval_reused"] = True
                 case_results[case.case_key] = output
 
-            duration_ms = (time.perf_counter() - started) * 1000
+            execution_duration_ms = (time.perf_counter() - started) * 1000
+            reused_retrieval_ms = (
+                sum(
+                    float(
+                        item["retrieval_trace"].get("total_latency_ms", 0.0)
+                        if isinstance(item.get("retrieval_trace"), dict)
+                        else 0.0
+                    )
+                    for item in hybrid_outputs.values()
+                )
+                if mode == "kg_personalized"
+                else 0.0
+            )
+            duration_ms = execution_duration_ms + reused_retrieval_ms
             raw_config = {
                 "git_commit": git_commit,
                 "dataset_version": dataset.version,
@@ -1004,6 +1028,8 @@ async def run_three_baselines(
                 "report_version": selected_report_version,
                 "git_dirty": git_dirty,
                 "duration_ms": round(duration_ms, 3),
+                "execution_duration_ms": round(execution_duration_ms, 3),
+                "base_retrieval_reused": mode == "kg_personalized",
             }
             run = await create_run(
                 session,
@@ -1019,6 +1045,8 @@ async def run_three_baselines(
                     "eval_run_id": str(run.id),
                     "trace_id": str(run.trace_id),
                     "duration_ms": round(duration_ms, 3),
+                    "execution_duration_ms": round(execution_duration_ms, 3),
+                    "base_retrieval_reused": mode == "kg_personalized",
                     "metrics": run.metrics,
                     "case_results": case_results,
                 }
