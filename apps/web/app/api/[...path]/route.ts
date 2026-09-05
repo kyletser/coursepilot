@@ -38,14 +38,50 @@ const ACCESS_COOKIE = "coursepilot_access";
 const REFRESH_COOKIE = "coursepilot_refresh";
 const REFRESH_MAX_AGE = 14 * 24 * 60 * 60;
 
-function cookieOptions(requestUrl: URL, maxAge: number) {
+function isSecureRequest(request: NextRequest, requestUrl: URL) {
+  if (requestUrl.protocol === "https:") return true;
+  // Behind a TLS-terminating reverse proxy the forwarded hop is http; trust
+  // the first x-forwarded-proto value to keep the Secure flag correct.
+  const forwardedProto = request.headers.get("x-forwarded-proto");
+  if (!forwardedProto) return false;
+  return forwardedProto.split(",")[0].trim().toLowerCase() === "https";
+}
+
+function cookieOptions(request: NextRequest, requestUrl: URL, maxAge: number) {
   return {
     httpOnly: true,
     maxAge,
     path: "/",
     sameSite: "lax" as const,
-    secure: requestUrl.protocol === "https:",
+    secure: isSecureRequest(request, requestUrl),
   };
+}
+
+function isSameSiteRequest(request: NextRequest, incomingUrl: URL) {
+  // Mutations must prove they originate from this site. Prefer Origin, fall
+  // back to Sec-Fetch-Site (modern browsers) and Referer; a request carrying
+  // none of these signals fails closed instead of passing by default.
+  const origin = request.headers.get("origin");
+  if (origin) {
+    try {
+      return new URL(origin).origin === incomingUrl.origin;
+    } catch {
+      return false;
+    }
+  }
+  const secFetchSite = request.headers.get("sec-fetch-site");
+  if (secFetchSite) {
+    return secFetchSite.toLowerCase() === "same-origin";
+  }
+  const referer = request.headers.get("referer");
+  if (referer) {
+    try {
+      return new URL(referer).origin === incomingUrl.origin;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function getApiOrigin() {
@@ -69,16 +105,7 @@ async function proxyRequest(request: NextRequest, context: ProxyContext) {
     targetUrl.search = incomingUrl.search;
 
     const isMutation = !["GET", "HEAD", "OPTIONS"].includes(request.method);
-    const origin = request.headers.get("origin");
-    let originMatches = true;
-    if (origin) {
-      try {
-        originMatches = new URL(origin).origin === incomingUrl.origin;
-      } catch {
-        originMatches = false;
-      }
-    }
-    if (isMutation && !originMatches) {
+    if (isMutation && !isSameSiteRequest(request, incomingUrl)) {
       return Response.json(
         {
           data: null,
@@ -101,7 +128,13 @@ async function proxyRequest(request: NextRequest, context: ProxyContext) {
     const headers = new Headers(request.headers);
     requestHopByHopHeaders.forEach((header) => headers.delete(header));
     headers.set("x-forwarded-host", incomingUrl.host);
-    headers.set("x-forwarded-proto", incomingUrl.protocol.slice(0, -1));
+    // Keep the original client-facing protocol if we sit behind a TLS proxy,
+    // otherwise report this hop's protocol to the upstream API.
+    const existingProto = request.headers.get("x-forwarded-proto");
+    headers.set(
+      "x-forwarded-proto",
+      existingProto?.split(",")[0].trim() || incomingUrl.protocol.slice(0, -1),
+    );
     headers.delete("cookie");
     headers.delete("authorization");
     const accessToken = request.cookies.get(ACCESS_COOKIE)?.value;
@@ -150,12 +183,12 @@ async function proxyRequest(request: NextRequest, context: ProxyContext) {
         response.cookies.set(
           ACCESS_COOKIE,
           payload.data.access_token,
-          cookieOptions(incomingUrl, payload.data.expires_in ?? 900),
+          cookieOptions(request, incomingUrl, payload.data.expires_in ?? 900),
         );
         response.cookies.set(
           REFRESH_COOKIE,
           payload.data.refresh_token,
-          cookieOptions(incomingUrl, REFRESH_MAX_AGE),
+          cookieOptions(request, incomingUrl, REFRESH_MAX_AGE),
         );
       } else if (isRefresh) {
         response.cookies.delete(ACCESS_COOKIE);

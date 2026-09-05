@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Hashable, Iterable, Mapping
+from collections.abc import Hashable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
@@ -244,13 +244,13 @@ def _normalize_concepts(
 ) -> tuple[dict[ConceptId, Concept], dict[ConceptId, int]]:
     normalized: dict[ConceptId, Concept] = {}
     order: dict[ConceptId, int] = {}
-    items = concepts.items() if isinstance(concepts, Mapping) else None
-    if items is not None:
+    source: Iterator[Concept]
+    if isinstance(concepts, Mapping):
         source = (
             value
             if isinstance(value, Concept)
             else Concept(concept_id=concept_id, status=value)
-            for concept_id, value in items
+            for concept_id, value in concepts.items()
         )
     else:
         source = iter(concepts)

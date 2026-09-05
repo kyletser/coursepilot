@@ -44,7 +44,7 @@ async def postgres_client(tmp_path) -> AsyncIterator[httpx.AsyncClient]:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         settings = Settings(
-            _env_file=None,
+            _env_file=None,  # type: ignore[call-arg]
             environment="test",
             database_url=database_url,
             jwt_secret="coursepilot-postgres-test-secret-32-bytes",

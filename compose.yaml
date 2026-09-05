@@ -6,6 +6,13 @@ x-logging: &default-logging
     max-size: 10m
     max-file: "3"
 
+# SECURITY — local-only defaults.
+# Every "*-change-me" password (PostgreSQL, Redis, Neo4j) and the JWT_SECRET
+# placeholder below are non-secrets intended exclusively for local Docker
+# Compose development. Before ANY non-local deployment you MUST override them
+# via environment variables or a real .env file (see .env.example):
+#   POSTGRES_PASSWORD, REDIS_PASSWORD, NEO4J_PASSWORD, JWT_SECRET,
+#   LLM_API_KEY. Never deploy with these defaults.
 x-api-environment: &api-environment
   APP_NAME: CoursePilot API
   ENVIRONMENT: ${ENVIRONMENT:-development}

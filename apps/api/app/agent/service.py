@@ -490,7 +490,7 @@ class CourseLearningBusinessHandler:
         )
 
     async def _active_concepts(self) -> list[ConceptCandidate]:
-        index = await self.learning._active_index(self.session, self.course_id)
+        index = await self.learning.active_index(self.session, self.course_id)
         return list(
             (
                 await self.session.scalars(
@@ -531,13 +531,12 @@ class CourseLearningBusinessHandler:
         target_id = self._target_id(route)
         if target_id is None:
             mastery = await self._mastery()
-            target_id = min(
-                concepts,
-                key=lambda item: (
-                    mastery.get(item.id).mastery if item.id in mastery else 0.5,
-                    item.name,
-                ),
-            ).id
+
+            def weakness_key(item: ConceptCandidate) -> tuple[float, str]:
+                state = mastery.get(item.id)
+                return (state.mastery if state is not None else 0.5, item.name)
+
+            target_id = min(concepts, key=weakness_key).id
         try:
             result = await self.learning.learning_path(
                 self.session,

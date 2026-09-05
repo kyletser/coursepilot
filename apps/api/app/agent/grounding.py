@@ -237,16 +237,16 @@ def verify_grounding(
     for claim_index, claim in enumerate(claims):
         cited_sources: list[str] = []
         for label in claim.citation_labels:
-            citation = labels.get(label)
-            if citation is None:
+            matched = labels.get(label)
+            if matched is None:
                 errors.append(
                     f"claim {claim_index} references missing citation {label}"
                 )
                 continue
             expected_claims_by_label[label].append(claim_index)
-            source = evidence_by_chunk.get(citation.chunk_id)
+            source = evidence_by_chunk.get(matched.chunk_id)
             if source is not None:
-                cited_sources.append(citation.quote)
+                cited_sources.append(matched.quote)
         if cited_sources and not checker(claim.text, "\n".join(cited_sources)):
             errors.append(f"claim {claim_index} is not supported by its cited quote")
 
@@ -260,6 +260,16 @@ def verify_grounding(
 
 
 def lexical_claim_support(claim: str, source: str) -> bool:
+    """Heuristic lexical check that a claim is supported by a source chunk.
+
+    The overlap thresholds are tuned knobs, not arbitrary constants: 0.5 for
+    English content-word overlap and 0.35 for Chinese bigram overlap. Changes
+    must be validated against END_TO_END_QA evaluation runs
+    (citation_accuracy / false_refusal_rate) rather than adjusted ad hoc —
+    raising them increases false refusals, lowering them lets ungrounded
+    claims through.
+    """
+
     normalized_claim = " ".join(claim.casefold().split())
     normalized_source = " ".join(source.casefold().split())
     if normalized_claim in normalized_source:

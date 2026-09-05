@@ -465,11 +465,15 @@ function GraphCandidateList({
   kind,
   busyKey,
   onReview,
+  selections,
+  onToggle,
 }: {
   candidates: GraphCandidate[];
   kind: ReviewKind;
   busyKey: string | null;
   onReview: (kind: ReviewKind, id: string, decision: ReviewDecision) => void;
+  selections: Record<string, ReviewDecision>;
+  onToggle: (kind: ReviewKind, id: string, decision: ReviewDecision) => void;
 }) {
   const label = kind === "concepts" ? "概念" : "关系";
   if (!candidates.length) {
@@ -488,6 +492,7 @@ function GraphCandidateList({
         const itemKey = `${kind}:${candidate.id}`;
         const reviewing = busyKey === itemKey;
         const reviewable = canReview(candidate.status);
+        const selectedDecision = selections[itemKey];
         return (
           <li key={candidate.id}>
             <PanelCard>
@@ -523,27 +528,55 @@ function GraphCandidateList({
                 </div>
 
                 {reviewable ? (
-                  <div className="flex shrink-0 flex-wrap gap-2">
-                    <button
-                      aria-label={`批准${label}候选：${title}`}
-                      className={primaryButtonClass}
-                      disabled={reviewing || busyKey !== null}
-                      onClick={() => onReview(kind, candidate.id, "approve")}
-                      type="button"
-                    >
-                      <CheckIcon className="size-4" />
-                      批准
-                    </button>
-                    <button
-                      aria-label={`拒绝${label}候选：${title}`}
-                      className={dangerButtonClass}
-                      disabled={reviewing || busyKey !== null}
-                      onClick={() => onReview(kind, candidate.id, "reject")}
-                      type="button"
-                    >
-                      <XIcon className="size-4" />
-                      拒绝
-                    </button>
+                  <div className="flex shrink-0 flex-col gap-2">
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        aria-label={`批准${label}候选：${title}`}
+                        className={primaryButtonClass}
+                        disabled={reviewing || busyKey !== null}
+                        onClick={() => onReview(kind, candidate.id, "approve")}
+                        type="button"
+                      >
+                        <CheckIcon className="size-4" />
+                        批准
+                      </button>
+                      <button
+                        aria-label={`拒绝${label}候选：${title}`}
+                        className={dangerButtonClass}
+                        disabled={reviewing || busyKey !== null}
+                        onClick={() => onReview(kind, candidate.id, "reject")}
+                        type="button"
+                      >
+                        <XIcon className="size-4" />
+                        拒绝
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        aria-pressed={selectedDecision === "approve"}
+                        className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition ${
+                          selectedDecision === "approve"
+                            ? "border-[#2f6961] bg-[#e5f0eb] text-[#2f6961]"
+                            : "border-[#172523]/12 bg-white/60 text-[#6c7774] hover:border-[#2f6961]/40"
+                        }`}
+                        onClick={() => onToggle(kind, candidate.id, "approve")}
+                        type="button"
+                      >
+                        {selectedDecision === "approve" ? "已选中：批准" : "选中批准"}
+                      </button>
+                      <button
+                        aria-pressed={selectedDecision === "reject"}
+                        className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition ${
+                          selectedDecision === "reject"
+                            ? "border-[#a84235] bg-[#fdeeec] text-[#944237]"
+                            : "border-[#172523]/12 bg-white/60 text-[#6c7774] hover:border-[#a84235]/40"
+                        }`}
+                        onClick={() => onToggle(kind, candidate.id, "reject")}
+                        type="button"
+                      >
+                        {selectedDecision === "reject" ? "已选中：拒绝" : "选中拒绝"}
+                      </button>
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -554,6 +587,22 @@ function GraphCandidateList({
     </ul>
   );
 }
+
+type BatchReviewResponseItem = {
+  kind: "concept" | "relation";
+  candidate_id: string;
+  decision: ReviewDecision;
+  status: "ok" | "error";
+  error: { code?: string; message?: string } | null;
+};
+
+type BatchReviewResponse = {
+  course_id: string;
+  items: BatchReviewResponseItem[];
+  summary: { total: number; approved: number; rejected: number; failed: number };
+};
+
+const MAX_BATCH_REVIEW_ITEMS = 50;
 
 function GraphPanel({ courseId }: { courseId: string }) {
   const [candidates, setCandidates] = useState<GraphCandidates>({
@@ -566,6 +615,9 @@ function GraphPanel({ courseId }: { courseId: string }) {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState<unknown>(null);
+  const [selections, setSelections] = useState<Record<string, ReviewDecision>>({});
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchFailures, setBatchFailures] = useState<BatchReviewResponseItem[]>([]);
 
   const loadGraphReview = useCallback(
     async (showLoading = true) => {
@@ -593,6 +645,33 @@ function GraphPanel({ courseId }: { courseId: string }) {
     void loadGraphReview();
   }, [loadGraphReview]);
 
+  function clearSelections() {
+    setSelections({});
+    setBatchFailures([]);
+  }
+
+  function toggleSelection(kind: ReviewKind, id: string, decision: ReviewDecision) {
+    const itemKey = `${kind}:${id}`;
+    setBatchFailures([]);
+    setSelections((current) => {
+      const next = { ...current };
+      if (next[itemKey] === decision) delete next[itemKey];
+      else next[itemKey] = decision;
+      return next;
+    });
+  }
+
+  function selectAll(kind: ReviewKind, decision: ReviewDecision) {
+    setBatchFailures([]);
+    setSelections((current) => {
+      const next = { ...current };
+      for (const candidate of candidates[kind]) {
+        if (canReview(candidate.status)) next[`${kind}:${candidate.id}`] = decision;
+      }
+      return next;
+    });
+  }
+
   async function reviewCandidate(
     kind: ReviewKind,
     id: string,
@@ -606,6 +685,11 @@ function GraphPanel({ courseId }: { courseId: string }) {
       await apiRequest<GraphCandidate>(`/graph/${kind}/${id}/${decision}`, {
         method: "POST",
       });
+      setSelections((current) => {
+        const next = { ...current };
+        delete next[itemKey];
+        return next;
+      });
       await loadGraphReview(false);
     } catch (nextError) {
       setError(nextError);
@@ -613,6 +697,63 @@ function GraphPanel({ courseId }: { courseId: string }) {
       setBusyKey(null);
     }
   }
+
+  async function submitBatchReview() {
+    const entries = Object.entries(selections);
+    if (!entries.length) return;
+    if (entries.length > MAX_BATCH_REVIEW_ITEMS) {
+      setError(
+        new Error(
+          `一次最多批量审核 ${MAX_BATCH_REVIEW_ITEMS} 项，当前已选中 ${entries.length} 项`,
+        ),
+      );
+      return;
+    }
+    setBatchBusy(true);
+    setNotice("");
+    setError(null);
+    setBatchFailures([]);
+    try {
+      const result = await apiRequest<BatchReviewResponse>(
+        `/courses/${courseId}/graph/candidates/batch-review`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            items: entries.map(([itemKey, decision]) => {
+              const [kind, id] = itemKey.split(":");
+              return {
+                kind: kind === "concepts" ? "concept" : "relation",
+                candidate_id: id,
+                decision,
+              };
+            }),
+          }),
+        },
+      );
+      const { summary } = result;
+      setNotice(
+        `批量审核完成：批准 ${summary.approved} 项，拒绝 ${summary.rejected} 项` +
+          (summary.failed ? `，失败 ${summary.failed} 项` : ""),
+      );
+      setBatchFailures(result.items.filter((item) => item.status === "error"));
+      setSelections((current) => {
+        const next = { ...current };
+        for (const item of result.items) {
+          if (item.status === "ok") {
+            delete next[`${item.kind === "concept" ? "concepts" : "relations"}:${item.candidate_id}`];
+          }
+        }
+        return next;
+      });
+      await loadGraphReview(false);
+    } catch (nextError) {
+      setError(nextError);
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
+  const selectedCount = Object.keys(selections).length;
 
   async function publishCourseVersion() {
     const confirmed = window.confirm(
@@ -698,6 +839,59 @@ function GraphPanel({ courseId }: { courseId: string }) {
         ) : null}
       </PanelCard>
 
+      <PanelCard>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-[#52615e]">
+            批量审核：已选中{" "}
+            <strong className="text-[#263936]">{selectedCount}</strong> 项（单批最多{" "}
+            {MAX_BATCH_REVIEW_ITEMS}{" "}
+            项）。批量中的每一项按单项审核的同一规则处理，失败项会单独标注，不影响其他项。
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className={secondaryButtonClass}
+              disabled={!selectedCount || batchBusy || busyKey !== null}
+              onClick={clearSelections}
+              type="button"
+            >
+              清空选择
+            </button>
+            <button
+              className={primaryButtonClass}
+              disabled={!selectedCount || selectedCount > MAX_BATCH_REVIEW_ITEMS || batchBusy || busyKey !== null}
+              onClick={() => void submitBatchReview()}
+              type="button"
+            >
+              {batchBusy ? <Spinner label="正在批量审核" /> : `提交批量审核（${selectedCount}）`}
+            </button>
+          </div>
+        </div>
+        {selectedCount > MAX_BATCH_REVIEW_ITEMS ? (
+          <p className="mt-3 rounded-xl bg-[#f5ecdc] px-3 py-2 text-xs text-[#8b602b]">
+            已超过单批上限，请减少选中项后提交。
+          </p>
+        ) : null}
+        {batchFailures.length ? (
+          <ul className="mt-4 grid gap-2" aria-label="批量审核失败项">
+            {batchFailures.map((item) => (
+              <li
+                className="rounded-xl border border-[#a84235]/18 bg-[#fff4f1] px-4 py-3 text-sm text-[#71372f]"
+                key={`${item.kind}:${item.candidate_id}`}
+              >
+                <span className="font-semibold">
+                  {item.kind === "concept" ? "概念" : "关系"} ·{" "}
+                  {item.decision === "approve" ? "批准" : "拒绝"}失败
+                </span>
+                <span className="ml-2">
+                  {item.error?.message ?? "服务端未返回错误详情"}
+                  {item.error?.code ? `（${item.error.code}）` : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </PanelCard>
+
       {loading ? (
         <PanelCard className="grid min-h-56 place-items-center text-sm text-[#687370]">
           <Spinner label="正在读取图谱候选" />
@@ -705,36 +899,72 @@ function GraphPanel({ courseId }: { courseId: string }) {
       ) : (
         <div className="space-y-8">
           <section aria-labelledby="concept-candidates-title">
-            <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <h3 className="text-lg font-semibold text-[#263936]" id="concept-candidates-title">
                 概念候选
               </h3>
-              <span className="text-xs font-semibold text-[#75817e]">
-                {candidates.concepts.length} 项
-              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold text-[#75817e]">
+                  {candidates.concepts.length} 项
+                </span>
+                <button
+                  className="rounded-lg border border-[#172523]/12 bg-white/60 px-2.5 py-1 text-[11px] font-semibold text-[#6c7774] transition hover:border-[#2f6961]/40"
+                  onClick={() => selectAll("concepts", "approve")}
+                  type="button"
+                >
+                  全选批准
+                </button>
+                <button
+                  className="rounded-lg border border-[#172523]/12 bg-white/60 px-2.5 py-1 text-[11px] font-semibold text-[#6c7774] transition hover:border-[#a84235]/40"
+                  onClick={() => selectAll("concepts", "reject")}
+                  type="button"
+                >
+                  全选拒绝
+                </button>
+              </div>
             </div>
             <GraphCandidateList
               busyKey={busyKey}
               candidates={candidates.concepts}
               kind="concepts"
               onReview={(kind, id, decision) => void reviewCandidate(kind, id, decision)}
+              onToggle={toggleSelection}
+              selections={selections}
             />
           </section>
 
           <section aria-labelledby="relation-candidates-title">
-            <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <h3 className="text-lg font-semibold text-[#263936]" id="relation-candidates-title">
                 关系候选
               </h3>
-              <span className="text-xs font-semibold text-[#75817e]">
-                {candidates.relations.length} 项
-              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold text-[#75817e]">
+                  {candidates.relations.length} 项
+                </span>
+                <button
+                  className="rounded-lg border border-[#172523]/12 bg-white/60 px-2.5 py-1 text-[11px] font-semibold text-[#6c7774] transition hover:border-[#2f6961]/40"
+                  onClick={() => selectAll("relations", "approve")}
+                  type="button"
+                >
+                  全选批准
+                </button>
+                <button
+                  className="rounded-lg border border-[#172523]/12 bg-white/60 px-2.5 py-1 text-[11px] font-semibold text-[#6c7774] transition hover:border-[#a84235]/40"
+                  onClick={() => selectAll("relations", "reject")}
+                  type="button"
+                >
+                  全选拒绝
+                </button>
+              </div>
             </div>
             <GraphCandidateList
               busyKey={busyKey}
               candidates={candidates.relations}
               kind="relations"
               onReview={(kind, id, decision) => void reviewCandidate(kind, id, decision)}
+              onToggle={toggleSelection}
+              selections={selections}
             />
           </section>
         </div>

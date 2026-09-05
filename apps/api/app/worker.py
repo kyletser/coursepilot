@@ -9,7 +9,7 @@ celery_app = Celery(
     "coursepilot",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks.ingestion", "app.tasks.graph"],
+    include=["app.tasks.ingestion", "app.tasks.graph", "app.tasks.evaluation"],
 )
 celery_app.conf.update(
     task_serializer="json",

@@ -1,18 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
+import logging
 import uuid
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Query, Request
+from fastapi import APIRouter, Query, Request
 from pydantic import Field, field_validator, model_validator
 from sqlalchemy import select
 
 from app.dependencies import SessionDep, TeacherUser
 from app.errors import success_response
 from app.evaluation import service
-from app.evaluation.runner import run_three_baselines
 from app.models import (
     BadCaseSourceType,
     BadCaseStatus,
@@ -21,6 +21,9 @@ from app.models import (
     EvalRunStatus,
 )
 from app.schemas import RequestModel
+from app.tasks.evaluation import enqueue_eval_run
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["evaluation"])
 
@@ -78,9 +81,7 @@ class EvalCaseUpdateRequest(RequestModel):
 class EvalRunCreateRequest(RequestModel):
     index_version: int = Field(ge=1)
     report_version: str | None = Field(default=None, min_length=1, max_length=255)
-    prompt_version: str = Field(
-        default="no-generation/retrieval-eval-v1", min_length=1, max_length=255
-    )
+    prompt_version: str | None = Field(default=None, min_length=1, max_length=255)
     route_top_k: int = Field(default=20, ge=1, le=100)
     fusion_top_k: int = Field(default=20, ge=1, le=100)
     final_top_k: int = Field(default=10, ge=1, le=100)
@@ -90,62 +91,38 @@ class EvalRunCreateRequest(RequestModel):
     kg_weight: float = Field(default=1.0, ge=0, le=10)
 
 
-async def _execute_eval_run(app_state: Any, run_id: uuid.UUID) -> None:
-    async with app_state.session_factory() as session:
-        run = await session.scalar(
-            select(EvalRun).where(EvalRun.id == run_id).with_for_update()
-        )
-        if run is None or run.status != EvalRunStatus.QUEUED:
-            return
-        run.status = EvalRunStatus.RUNNING
-        run.started_at = datetime.now(UTC)
-        await session.commit()
-        dataset_id = run.dataset_id
-        launch = dict(run.config.get("launch", {}))
+async def _dispatch_eval_run(request: Request, run: EvalRun) -> None:
+    """Prefer the injected dispatcher hook; otherwise enqueue the Celery task.
 
+    Broker failures mark the run FAILED with a diagnostic code instead of
+    leaving it stuck in QUEUED forever.
+    """
+
+    dispatcher = getattr(request.app.state, "evaluation_run_dispatcher", None)
+    raw_launch = run.config.get("launch", {})
+    launch = dict(raw_launch) if isinstance(raw_launch, dict) else {}
     try:
-        result = await run_three_baselines(
-            session_factory=app_state.session_factory,
-            settings=app_state.settings,
-            dataset_id=dataset_id,
-            index_version=int(launch["index_version"]),
-            output_dir=Path("evaluation-reports"),
-            report_version=launch.get("report_version"),
-            prompt_version=str(launch["prompt_version"]),
-            route_top_k=int(launch["route_top_k"]),
-            fusion_top_k=int(launch["fusion_top_k"]),
-            final_top_k=int(launch["final_top_k"]),
-            rrf_k=int(launch["rrf_k"]),
-            reranker_timeout_seconds=float(launch["reranker_timeout_seconds"]),
-            graph_depth=int(launch["graph_depth"]),
-            kg_weight=float(launch["kg_weight"]),
+        if dispatcher is not None:
+            result = dispatcher(run.id, launch)
+            if inspect.isawaitable(result):
+                await result
+        elif request.app.state.settings.environment != "test":
+            await asyncio.to_thread(enqueue_eval_run, run.id)
+    except Exception:
+        logger.exception(
+            "Failed to dispatch evaluation run", extra={"run_id": str(run.id)}
         )
-    except Exception as exc:  # noqa: BLE001 - the job records every terminal failure
-        async with app_state.session_factory() as session:
-            run = await session.get(EvalRun, run_id)
-            if run is not None:
-                run.status = EvalRunStatus.FAILED
-                run.error_code = getattr(exc, "code", "EVAL_RUN_FAILED")
-                run.error_message = str(exc)[:4000]
-                run.finished_at = datetime.now(UTC)
-                await session.commit()
-        return
-
-    async with app_state.session_factory() as session:
-        run = await session.get(EvalRun, run_id)
-        if run is not None:
-            run.status = EvalRunStatus.SUCCEEDED
-            run.metrics = {
-                "report_path": str(result.report_path),
-                "baseline_run_ids": {
-                    mode: str(child_id) for mode, child_id in result.eval_run_ids.items()
-                },
-                "baselines": result.report["baselines"],
-            }
-            provenance = result.report["provenance"]
-            run.git_commit = str(provenance["git_commit"])
-            run.finished_at = datetime.now(UTC)
-            await session.commit()
+        async with request.app.state.session_factory() as failure_session:
+            failed = await failure_session.scalar(
+                select(EvalRun).where(EvalRun.id == run.id).with_for_update()
+            )
+            if failed is not None and failed.status == EvalRunStatus.QUEUED:
+                failed.status = EvalRunStatus.FAILED
+                failed.error_code = "EVAL_DISPATCH_FAILED"
+                failed.error_message = (
+                    "The evaluation worker queue is unavailable; retry the run."
+                )
+                await failure_session.commit()
 
 
 class BadCaseCreateRequest(RequestModel):
@@ -300,7 +277,6 @@ async def create_eval_run(
     dataset_id: uuid.UUID,
     payload: EvalRunCreateRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
     session: SessionDep,
     teacher: TeacherUser,
 ):
@@ -311,11 +287,7 @@ async def create_eval_run(
         teacher=teacher,
         launch_config=launch,
     )
-    dispatcher = getattr(request.app.state, "evaluation_run_dispatcher", None)
-    if dispatcher is not None:
-        await dispatcher(run.id, launch)
-    elif request.app.state.settings.environment != "test":
-        background_tasks.add_task(_execute_eval_run, request.app.state, run.id)
+    await _dispatch_eval_run(request, run)
     return success_response(request, service.run_data(run), status_code=202)
 
 

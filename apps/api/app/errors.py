@@ -120,7 +120,7 @@ def install_exception_handlers(app: FastAPI) -> None:
             status_code=exc.status_code,
             code="HTTP_ERROR",
             message=detail,
-            headers=exc.headers,
+            headers=dict(exc.headers) if exc.headers is not None else None,
         )
 
     @app.exception_handler(Exception)

@@ -15,7 +15,7 @@ from app.security import PasswordService, TokenService, hash_secret
 @pytest.fixture
 def security_settings() -> Settings:
     return Settings(
-        _env_file=None,
+        _env_file=None,  # type: ignore[call-arg]
         environment="test",
         database_url="sqlite+aiosqlite:///:memory:",
         jwt_secret="coursepilot-test-secret-at-least-32-bytes",

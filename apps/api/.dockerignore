@@ -1,7 +1,11 @@
 .env
 .pytest_cache
 .ruff_cache
+.mypy_cache
 .coverage
 __pycache__
 *.py[cod]
+*.egg-info
+.venv
 tests
+.git

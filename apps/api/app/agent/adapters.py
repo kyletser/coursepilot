@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 import httpx
@@ -24,6 +25,10 @@ _PLACEHOLDER_VALUES = {
     "your-api-key",
     "your-model",
 }
+# Spec §9.2: transient transport failures and throttling/server errors are the
+# only HTTP conditions worth retrying; other 4xx responses are contract errors
+# that deterministic fallbacks must handle instead of burning the retry budget.
+_RETRYABLE_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 def _is_configured_value(value: str) -> bool:
@@ -104,12 +109,19 @@ class OpenAICompatibleChatAdapter:
         api_key: str,
         model: str,
         timeout_seconds: float = 45.0,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 1.0,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not all(_is_configured_value(value) for value in (base_url, api_key, model)):
             raise ValueError("OpenAI-compatible chat configuration is incomplete")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if max_retries < 0:
+            raise ValueError("max_retries must not be negative")
+        if retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must not be negative")
         parsed_url = httpx.URL(base_url.strip())
         if parsed_url.scheme not in {"http", "https"} or not parsed_url.host:
             raise ValueError("base_url must be an absolute HTTP(S) URL")
@@ -117,6 +129,9 @@ class OpenAICompatibleChatAdapter:
         self.api_key = api_key.strip()
         self.model = model.strip()
         self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self._sleep = sleep or asyncio.sleep
         self.transport = transport
 
     async def generate(self, prompt: GenerationPrompt) -> AnswerDraft:
@@ -148,12 +163,10 @@ class OpenAICompatibleChatAdapter:
             timeout=self.timeout_seconds,
             transport=self.transport,
         ) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json=request_payload,
-            )
-            response.raise_for_status()
+            # Generation completes before the first token is streamed to the
+            # client, so every retry here stays within the spec §9.2 rule that
+            # retries may only happen before the first token is sent.
+            response = await self._post_with_retries(client, headers, request_payload)
             response_payload = response.json()
         if not isinstance(response_payload, Mapping):
             raise TypeError("chat completion response root must be an object")
@@ -161,6 +174,39 @@ class OpenAICompatibleChatAdapter:
             response_payload,
             allowed_citation_labels=prompt.allowed_citation_labels,
         )
+
+    async def _post_with_retries(
+        self,
+        client: httpx.AsyncClient,
+        headers: Mapping[str, str],
+        payload: Mapping[str, Any],
+    ) -> httpx.Response:
+        """POST one chat completion, retrying transient failures with backoff."""
+
+        last_transport_error: httpx.TransportError | None = None
+        for attempt in range(self.max_retries + 1):
+            if attempt:
+                await self._sleep(self.retry_backoff_seconds * (2 ** (attempt - 1)))
+            try:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=dict(headers),
+                    json=dict(payload),
+                )
+            except httpx.TransportError as exc:
+                # Timeouts, connection resets and DNS failures are transient;
+                # the final attempt re-raises so callers fail closed.
+                last_transport_error = exc
+                continue
+            if (
+                response.status_code in _RETRYABLE_STATUS_CODES
+                and attempt < self.max_retries
+            ):
+                continue
+            response.raise_for_status()
+            return response
+        assert last_transport_error is not None
+        raise last_transport_error
 
 
 def build_openai_chat_adapter(

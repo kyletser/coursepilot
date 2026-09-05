@@ -129,7 +129,7 @@ CoursePilot 的产品定位最终确定为：
 
 ## 9. 当前状态
 
-截至 2026-08-30：
+截至 2026-09-01：
 
 - 已完成产品与技术规格，并将实施节奏调整为连续推进。
 - 已初始化 Git、Next.js Web、FastAPI API、Celery Worker、Docker Compose 与 CI。
@@ -138,6 +138,7 @@ CoursePilot 的产品定位最终确定为：
 - 已实现教师与学生双角色 Web 工作台，包含课程发布、知识图谱、学习历史、Bad Case、评测中心和学生学习汇总；本地关键回归包含 126 项后端测试以及前端 lint、类型检查和生产构建。
 - 已提供两门原创 CC-BY-4.0 开放样例、一键真实入库脚本和三组检索基线运行器；脚本遇到模型或基础设施缺失时明确失败。种子脚本额外创建演示规模、人工标注的 DRAFT 评测数据集（检索用例绑定真实 chunk ID），不冻结、不产出任何指标。
 - 2026-08-31 修复审查确认的高优先缺陷：`CourseIndex` 记录语料覆盖集（迁移 0003）并贯通检索、发布与旧会话服务（版本隔离）；证据分数门槛改为真实校准（BM25 覆盖分、dense 相似度锚定、rerank sigmoid），移除按排名伪造的兜底分；Worker 进程级复用 BGE-M3；前端测验幂等键随题生成、网络瞬断不再清除登录态；Markdown 前置元数据入库即剥离；文档与决策记录同步（LangGraph/bm25s/确定性抽取）。
+- 2026-09-01 完成代码与功能审查报告中全部高/中/低优先项修复：评测 Runner 扩展至意图路由、学习路径与端到端问答；图谱候选批量审核端点；LLM 调用指数退避重试；前端 CSRF/Secure Cookie/CSP/超时/断流恢复加固；Dockerfile 多阶段与非 root 运行、`.dockerignore`、compose 弱凭据说明；CI 引入 ruff check、ruff format 校验与 mypy。本地回归 146 项后端测试通过（另 1 项未配置 PostgreSQL 测试库而跳过），ruff 与 mypy 全绿。
 - 尚未把任何演示指标写入项目结论；下一步在 Docker daemon 可用的干净环境中完成真实样例入库、冻结评测和质量门槛验收。
 
 ## 10. 决策记录维护规则
@@ -162,3 +163,9 @@ CoursePilot 的产品定位最终确定为：
 | 2026-08-31 | 浏览器令牌迁移到同源 BFF 的 HttpOnly Cookie | 避免长期 Refresh Token 被同源脚本读取，同时通过 Origin 校验和 SameSite 限制 CSRF | API 仍保留 Bearer 契约供 CLI 和服务间调用 |
 | 2026-08-31 | Eval Run API 只排队服务端真实三基线运行，不接受客户端 Case 结果 | 防止外部提交结果被持久化为成功指标 | CLI 与服务端入口复用同一个真实 Runner，运行结果保留完整来源 |
 | 2026-08-31 | `CourseIndex` 记录 `covered_document_version_ids`，检索与发布只作用于该覆盖集 | 修复版本隔离缺陷：旧版本会话不得引用新发布语料，发布不得翻转索引未覆盖的文档版本 | 数据契约新增可空 JSON 列（迁移 0003）；无覆盖集的迁移前索引检索时失败关闭，发布前必须重建 |
+| 2026-09-01 | 新增图谱候选批量审核端点 `POST /courses/{course_id}/graph/candidates/batch-review`（每批 1–50 项） | 教师审核需一次处理多条候选，单条审核效率过低且难以统一事务语义 | 单项校验失败不中断整批，逐条返回结果与错误码；权限、归属、环检测仍在服务端逐项校验 |
+| 2026-09-01 | LLM 调用对瞬时故障采用指数退避重试（408/425/429/500/502/503/504 与传输层错误），其余 4xx 视为契约错误直接失败 | 满足 spec §9.2“仅在首 token 前可重试”，避免对占位/无效配置无谓重试并防止打满上游 | `OpenAICompatibleChatAdapter` 内置退避；重试预算耗尽后失败关闭，交由确定性降级链路 |
+| 2026-09-01 | 评测 Runner 扩展覆盖 `INTENT_ROUTING`、`LEARNING_PATH`、`END_TO_END_QA` 三类数据集 | 此前仅检索基线可量化，路由/路径/端到端问答缺失可复现的评测口径 | 每类数据集有独立指标与阈值校验；沿用冻结数据集与真实运行约束，不产出伪造指标 |
+| 2026-09-01 | 评测运行改由 Celery 异步调度（`coursepilot.evaluation.run`），Router 通过可注入的 `evaluation_run_dispatcher` 排队 | 长耗时评测阻塞 API 请求会带来超时与资源占用问题 | 运行状态入库可查询；测试可注入同步/记录型 dispatcher，保持行为可验证 |
+| 2026-09-01 | 前端安全加固：CSRF 失败关闭（Origin→Sec-Fetch-Site→Referer）、反代下按 `x-forwarded-proto` 置 `Secure`、CSP 头、30s 请求超时、SSE 连接超时与 `CHAT_STREAM_INTERRUPTED` 后按历史恢复 | 防跨站请求伪造、避免非 HTTPS 泄漏 Cookie、限制长时间挂起并保证断流可恢复 | BFF 统一处理；API 侧 Bearer 契约不变 |
+| 2026-09-01 | 引入 mypy 静态类型检查（`app` 与 `tests`），并在 CI 中加入 `ruff check`、`ruff format --check`、`mypy` | 提前捕获类型与契约不一致问题，补齐质量门槛 | `pyproject.toml` 新增 `[tool.mypy]` 与 test 依赖；CI backend 作业更名为 lint+typecheck+tests+migration |

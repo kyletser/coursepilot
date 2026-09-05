@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -21,6 +23,7 @@ from app.graph.domain import (
 from app.graph.domain import (
     RelationType as DomainRelationType,
 )
+from app.graph.domain import validate_relation_type
 from app.graph.errors import GraphCoreError
 from app.graph.outbox import GraphOutboxEvent
 from app.graph.review import GraphReviewService, assert_prerequisite_publishable
@@ -46,6 +49,21 @@ from app.models import (
     User,
     UserRole,
 )
+
+# FR-GRAPH-003: one request may review several candidates of the same course.
+# The cap bounds lock hold time for relation cycle detection while still
+# covering a full chapter's worth of candidates in a single call.
+MAX_BATCH_REVIEW_ITEMS = 50
+
+
+@dataclass(frozen=True, slots=True)
+class BatchReviewItem:
+    kind: Literal["concept", "relation"]
+    candidate_id: uuid.UUID
+    decision: Literal["approve", "reject"]
+    name: str | None = None
+    description: str | None = None
+    relation_type: RelationType | None = None
 
 
 class GraphService:
@@ -94,10 +112,9 @@ class GraphService:
                 )
             )
         ).all()
-        sources = await self._sources(
-            course_id,
-            {candidate.source_chunk_id for candidate in (*concepts, *relations)},
-        )
+        source_ids = {candidate.source_chunk_id for candidate in concepts}
+        source_ids.update(candidate.source_chunk_id for candidate in relations)
+        sources = await self._sources(course_id, source_ids)
         concept_lookup = {candidate.id: candidate for candidate in concepts}
         missing_endpoint_ids = {
             concept_id
@@ -277,7 +294,9 @@ class GraphService:
         except GraphCoreError as exc:
             raise self._graph_error(exc) from exc
 
-        candidate.type = RelationType(approval.fact.relation_type.value)
+        candidate.type = RelationType(
+            validate_relation_type(approval.fact.relation_type).value
+        )
         candidate.status = ReviewStatus.APPROVED
         candidate.reviewed_by = teacher.id
         candidate.reviewed_at = approval.fact.reviewed_at
@@ -305,6 +324,133 @@ class GraphService:
         endpoints = await self._relation_endpoints(candidate, require_approved=False)
         return self._relation_data(candidate, source, endpoints)
 
+    async def batch_review(
+        self,
+        course_id: uuid.UUID,
+        teacher: User,
+        items: Sequence[BatchReviewItem],
+    ) -> dict[str, Any]:
+        """Review several same-course candidates in one request (FR-GRAPH-003).
+
+        Items are processed sequentially with the exact single-item rules, so
+        relation approvals still run the full locked cycle check against every
+        decision accepted earlier in the same batch. A failing item is
+        reported per item instead of aborting the batch, and each successful
+        decision commits independently so partial progress stays durable and
+        auditable.
+        """
+
+        if not items:
+            raise AppError(
+                422,
+                "GRAPH_BATCH_REVIEW_EMPTY",
+                "Batch review requires at least one item",
+            )
+        if len(items) > MAX_BATCH_REVIEW_ITEMS:
+            raise AppError(
+                422,
+                "GRAPH_BATCH_REVIEW_TOO_LARGE",
+                f"Batch review accepts at most {MAX_BATCH_REVIEW_ITEMS} items",
+                details={"max_items": MAX_BATCH_REVIEW_ITEMS},
+            )
+        await self._owner_course(course_id, teacher)
+
+        results: list[dict[str, Any]] = []
+        approved = 0
+        rejected = 0
+        failed = 0
+        for item in items:
+            try:
+                await self._require_batch_membership(course_id, item)
+                if item.kind == "concept":
+                    if item.decision == "approve":
+                        data = await self.approve_concept(
+                            item.candidate_id,
+                            teacher,
+                            name=item.name,
+                            description=item.description,
+                        )
+                    else:
+                        data = await self.reject_concept(item.candidate_id, teacher)
+                elif item.decision == "approve":
+                    data = await self.approve_relation(
+                        item.candidate_id,
+                        teacher,
+                        relation_type=item.relation_type,
+                    )
+                else:
+                    data = await self.reject_relation(item.candidate_id, teacher)
+            except AppError as exc:
+                # The failed item may hold row locks or leave session state
+                # behind; reset it so later items are judged on their own
+                # committed state. Earlier items already committed.
+                await self.session.rollback()
+                failed += 1
+                results.append(
+                    {
+                        "kind": item.kind,
+                        "candidate_id": item.candidate_id,
+                        "decision": item.decision,
+                        "status": "error",
+                        "data": None,
+                        "error": {
+                            "code": exc.code,
+                            "message": exc.message,
+                            "details": exc.details,
+                        },
+                    }
+                )
+                continue
+            if item.decision == "approve":
+                approved += 1
+            else:
+                rejected += 1
+            results.append(
+                {
+                    "kind": item.kind,
+                    "candidate_id": item.candidate_id,
+                    "decision": item.decision,
+                    "status": "ok",
+                    "data": data,
+                    "error": None,
+                }
+            )
+        return {
+            "course_id": course_id,
+            "items": results,
+            "summary": {
+                "total": len(items),
+                "approved": approved,
+                "rejected": rejected,
+                "failed": failed,
+            },
+        }
+
+    async def _require_batch_membership(
+        self, course_id: uuid.UUID, item: BatchReviewItem
+    ) -> None:
+        if item.kind == "concept":
+            statement = select(ConceptCandidate.course_id).where(
+                ConceptCandidate.id == item.candidate_id,
+                ConceptCandidate.deleted_at.is_(None),
+            )
+        else:
+            statement = select(RelationCandidate.course_id).where(
+                RelationCandidate.id == item.candidate_id,
+                RelationCandidate.deleted_at.is_(None),
+            )
+        actual_course_id = await self.session.scalar(statement)
+        if actual_course_id != course_id:
+            # Same 404 contract as the single-item endpoints: a course-scoped
+            # batch must neither act on nor reveal foreign candidates.
+            if item.kind == "concept":
+                raise AppError(
+                    404, "GRAPH_CONCEPT_NOT_FOUND", "Concept candidate not found"
+                )
+            raise AppError(
+                404, "GRAPH_RELATION_NOT_FOUND", "Relation candidate not found"
+            )
+
     async def approved_graph(self, course_id: uuid.UUID, user: User) -> dict[str, Any]:
         await self._authorized_course(course_id, user)
         active_index = await self.session.scalar(
@@ -315,7 +461,9 @@ class GraphService:
             )
         )
         if active_index is None:
-            raise AppError(409, "ACTIVE_INDEX_REQUIRED", "The course has no active index")
+            raise AppError(
+                409, "ACTIVE_INDEX_REQUIRED", "The course has no active index"
+            )
         concepts = (
             await self.session.scalars(
                 select(ConceptCandidate)
@@ -651,13 +799,16 @@ class GraphService:
                 )
             )
         ).one_or_none()
-        if row is None and required:
-            raise AppError(
-                409,
-                "GRAPH_SOURCE_COURSE_MISMATCH",
-                "The candidate source chunk must belong to the same course",
-            )
-        return row
+        if row is None:
+            if required:
+                raise AppError(
+                    409,
+                    "GRAPH_SOURCE_COURSE_MISMATCH",
+                    "The candidate source chunk must belong to the same course",
+                )
+            return None
+        chunk, version, document = row
+        return chunk, version, document
 
     async def _sources(
         self, course_id: uuid.UUID, source_ids: set[uuid.UUID]

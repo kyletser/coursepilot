@@ -217,7 +217,9 @@ async def test_another_active_student_cannot_read_or_write_a_session(
     )
 
 
-async def test_business_intents_execute_reviewed_learning_services(client, app_instance):
+async def test_business_intents_execute_reviewed_learning_services(
+    client, app_instance
+):
     course, student, student_tokens = await _course_with_index(
         client, app_instance, suffix="d"
     )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -94,7 +94,11 @@ class LearningPathResult:
 class LearningService:
     """Transactional quiz and deterministic learning-path application service."""
 
-    async def _active_index(self, session: AsyncSession, course_id: uuid.UUID) -> CourseIndex:
+    async def active_index(
+        self, session: AsyncSession, course_id: uuid.UUID
+    ) -> CourseIndex:
+        """Resolve the course's ACTIVE index; shared with the agent service."""
+
         index = await session.scalar(
             select(CourseIndex).where(
                 CourseIndex.course_id == course_id,
@@ -103,7 +107,9 @@ class LearningService:
             )
         )
         if index is None:
-            raise AppError(409, "ACTIVE_INDEX_REQUIRED", "The course has no active index")
+            raise AppError(
+                409, "ACTIVE_INDEX_REQUIRED", "The course has no active index"
+            )
         return index
 
     async def require_owner_course(
@@ -381,7 +387,7 @@ class LearningService:
         difficulty: QuizDifficulty | None = None,
     ) -> QuizItem:
         await self.require_active_enrollment(session, course_id, student)
-        active_index = await self._active_index(session, course_id)
+        active_index = await self.active_index(session, course_id)
         covered_versions = {
             uuid.UUID(str(value))
             for value in (active_index.covered_document_version_ids or ())
@@ -445,7 +451,7 @@ class LearningService:
         if quiz is None:
             raise AppError(404, "QUIZ_NOT_FOUND", "Quiz item not found")
         await self.require_active_enrollment(session, quiz.course_id, student)
-        active_index = await self._active_index(session, quiz.course_id)
+        active_index = await self.active_index(session, quiz.course_id)
         current_concept = await session.scalar(
             select(ConceptCandidate.id).where(
                 ConceptCandidate.id == quiz.concept_id,
@@ -496,8 +502,10 @@ class LearningService:
                     "IDEMPOTENCY_KEY_REUSED",
                     "The idempotency key belongs to another quiz attempt",
                 )
-            mastery = await self._mastery_for_attempt(session, quiz, student_id)
-            return AttemptOutcome(existing, mastery, quiz, replayed=True)
+            replayed_mastery = await self._mastery_for_attempt(
+                session, quiz, student_id
+            )
+            return AttemptOutcome(existing, replayed_mastery, quiz, replayed=True)
 
         if quiz.status != ReviewStatus.APPROVED:
             raise AppError(
@@ -508,7 +516,7 @@ class LearningService:
             )
         await self._require_approved_quiz_dependencies(session, quiz)
 
-        mastery = await session.scalar(
+        mastery: DBMasteryState | None = await session.scalar(
             select(DBMasteryState)
             .where(
                 DBMasteryState.course_id == quiz.course_id,
@@ -606,7 +614,7 @@ class LearningService:
         student: User,
     ) -> tuple[tuple[DBMasteryState, ConceptCandidate], ...]:
         await self.require_active_enrollment(session, course_id, student)
-        active_index = await self._active_index(session, course_id)
+        active_index = await self.active_index(session, course_id)
         rows = (
             await session.execute(
                 select(DBMasteryState, ConceptCandidate)
@@ -625,7 +633,7 @@ class LearningService:
                 .order_by(ConceptCandidate.name.asc(), ConceptCandidate.id.asc())
             )
         ).all()
-        return tuple(rows)
+        return tuple((mastery_row, concept_row) for mastery_row, concept_row in rows)
 
     async def learning_path(
         self,
@@ -637,7 +645,7 @@ class LearningService:
         max_depth: int,
     ) -> LearningPathResult:
         await self.require_active_enrollment(session, course_id, student)
-        active_index = await self._active_index(session, course_id)
+        active_index = await self.active_index(session, course_id)
         target = await session.scalar(
             select(ConceptCandidate).where(
                 ConceptCandidate.id == target_concept_id,
@@ -730,7 +738,9 @@ class LearningService:
             )
             for relation in relations
         )
-        mastery_by_concept = {state.concept_id: state.mastery for state in mastery_rows}
+        mastery_by_concept: dict[Hashable, float | CoreMasteryState] = {
+            state.concept_id: state.mastery for state in mastery_rows
+        }
         try:
             planned = plan_learning_path(
                 target_concept_id,
@@ -767,20 +777,30 @@ class LearningService:
         for quiz in approved_quizzes:
             quiz_by_concept.setdefault(quiz.concept_id, quiz.id)
 
-        return LearningPathResult(
-            target_concept_id=target_concept_id,
-            max_depth=max_depth,
-            steps=tuple(
+        path_steps: list[LearningPathRecord] = []
+        for step in planned.steps:
+            step_concept_id = step.concept_id
+            if not isinstance(step_concept_id, uuid.UUID):
+                raise AppError(
+                    500,
+                    "INTERNAL_ERROR",
+                    "Learning path planner returned a non-UUID concept id",
+                )
+            path_steps.append(
                 LearningPathRecord(
-                    concept=concept_by_id[step.concept_id],
+                    concept=concept_by_id[step_concept_id],
                     mastery=step.mastery,
                     is_weak=step.is_weak,
                     depth=step.depth,
                     reason=step.reason,
-                    quiz_item_id=quiz_by_concept.get(step.concept_id),
+                    quiz_item_id=quiz_by_concept.get(step_concept_id),
                 )
-                for step in planned.steps
-            ),
+            )
+
+        return LearningPathResult(
+            target_concept_id=target_concept_id,
+            max_depth=max_depth,
+            steps=tuple(path_steps),
         )
 
     async def _require_approved_quiz_dependencies(

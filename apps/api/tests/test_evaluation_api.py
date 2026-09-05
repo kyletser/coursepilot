@@ -161,9 +161,7 @@ async def test_run_queues_server_execution_without_client_measured_metrics(
         headers=auth_headers(tokens),
         json={
             "index_version": 1,
-            "case_results": {
-                "stack-definition": {"ranked_chunk_ids": ["fabricated"]}
-            },
+            "case_results": {"stack-definition": {"ranked_chunk_ids": ["fabricated"]}},
         },
     )
     assert forged.status_code == 422

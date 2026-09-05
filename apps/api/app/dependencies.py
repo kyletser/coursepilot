@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -62,7 +62,7 @@ async def get_current_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-def require_role(role: UserRole) -> Callable[..., User]:
+def require_role(role: UserRole) -> Callable[[User], Awaitable[User]]:
     async def dependency(current_user: CurrentUser) -> User:
         if current_user.role != role:
             raise AppError(

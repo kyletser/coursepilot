@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import uuid
-from typing import Self
+from typing import Literal, Self
 
 from fastapi import APIRouter, Request
 from pydantic import Field, field_validator, model_validator
 
 from app.dependencies import CurrentUser, SessionDep, TeacherUser
 from app.errors import success_response
-from app.graph.service import GraphService
+from app.graph.service import MAX_BATCH_REVIEW_ITEMS, BatchReviewItem, GraphService
 from app.models import RelationType, ReviewStatus
 from app.schemas import RequestModel
 
@@ -88,6 +88,71 @@ class RelationApproveRequest(RequestModel):
     type: RelationType | None = None
 
 
+class BatchReviewItemRequest(RequestModel):
+    kind: Literal["concept", "relation"]
+    candidate_id: uuid.UUID
+    decision: Literal["approve", "reject"]
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=10_000)
+    relation_type: RelationType | None = None
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("name cannot be empty")
+        return stripped
+
+    @field_validator("description")
+    @classmethod
+    def strip_description(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+    @model_validator(mode="after")
+    def scope_optional_overrides(self) -> Self:
+        if (self.name is not None or self.description is not None) and not (
+            self.kind == "concept" and self.decision == "approve"
+        ):
+            raise ValueError(
+                "name and description are only allowed when approving a concept"
+            )
+        if self.relation_type is not None and not (
+            self.kind == "relation" and self.decision == "approve"
+        ):
+            raise ValueError("relation_type is only allowed when approving a relation")
+        return self
+
+    def to_service_item(self) -> BatchReviewItem:
+        return BatchReviewItem(
+            kind=self.kind,
+            candidate_id=self.candidate_id,
+            decision=self.decision,
+            name=self.name,
+            description=self.description,
+            relation_type=self.relation_type,
+        )
+
+
+class BatchReviewRequest(RequestModel):
+    items: list[BatchReviewItemRequest] = Field(
+        min_length=1, max_length=MAX_BATCH_REVIEW_ITEMS
+    )
+
+    @model_validator(mode="after")
+    def require_unique_candidates(self) -> Self:
+        seen: set[uuid.UUID] = set()
+        for item in self.items:
+            if item.candidate_id in seen:
+                raise ValueError(
+                    f"candidate_id {item.candidate_id} appears more than once"
+                )
+            seen.add(item.candidate_id)
+        return self
+
+
 @router.get("/courses/{course_id}/graph/candidates")
 async def list_graph_candidates(
     course_id: uuid.UUID,
@@ -98,6 +163,22 @@ async def list_graph_candidates(
 ):
     data = await GraphService(session).list_candidates(
         course_id, teacher, status=status
+    )
+    return success_response(request, data)
+
+
+@router.post("/courses/{course_id}/graph/candidates/batch-review")
+async def batch_review_graph_candidates(
+    course_id: uuid.UUID,
+    payload: BatchReviewRequest,
+    request: Request,
+    session: SessionDep,
+    teacher: TeacherUser,
+):
+    data = await GraphService(session).batch_review(
+        course_id,
+        teacher,
+        [item.to_service_item() for item in payload.items],
     )
     return success_response(request, data)
 

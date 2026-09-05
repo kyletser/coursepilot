@@ -6,6 +6,8 @@ from typing import Any
 
 from .types import DenseCandidate, FusedCandidate, LexicalCandidate
 
+RankedHit = DenseCandidate | LexicalCandidate
+
 
 @dataclass(slots=True)
 class _Accumulator:
@@ -19,9 +21,9 @@ class _Accumulator:
     lexical_rank: int | None = None
 
 
-def _deduplicate_ranked[T](candidates: Sequence[T]) -> list[T]:
+def _deduplicate_ranked(candidates: Sequence[RankedHit]) -> list[RankedHit]:
     seen: set[str] = set()
-    result: list[T] = []
+    result: list[RankedHit] = []
     for candidate in candidates:
         chunk_id = candidate.chunk_id
         if chunk_id not in seen:

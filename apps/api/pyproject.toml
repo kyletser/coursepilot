@@ -33,6 +33,7 @@ ml = [
 ]
 test = [
   "aiosqlite>=0.20,<1",
+  "mypy>=1.15,<2",
   "pytest>=8.3,<10",
   "pytest-asyncio>=0.25,<2",
   "pytest-cov>=6,<8",
@@ -60,3 +61,10 @@ source = ["app"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = false
+warn_unused_ignores = false
+files = ["app", "tests"]

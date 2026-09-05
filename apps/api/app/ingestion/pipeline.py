@@ -120,7 +120,10 @@ class IngestionPipeline:
             course_id = uuid.UUID(str(context["course_id"]))
             file_path = Path(str(context["file_path"]))
             original_filename = str(context["original_filename"])
-            details = dict(context["stage_details"])
+            stage_details = context["stage_details"]
+            if not isinstance(stage_details, dict):
+                raise TypeError("stage_details must be a mapping")
+            details = dict(stage_details)
 
             if not _has_checkpoint(details, IngestionStage.CHUNKING):
                 await self._set_stage(job_id, IngestionStage.PARSING, 10)

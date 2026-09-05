@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from app.graph.domain import ApprovedConcept, ApprovedRelation, ReviewStatus
+from app.graph.domain import (
+    ApprovedConcept,
+    ApprovedRelation,
+    ReviewStatus,
+    require_uuid,
+    validate_relation_type,
+)
 from app.graph.errors import InvalidOutboxEventError
 
 
@@ -57,7 +63,7 @@ def concept_approved_event(
     return GraphOutboxEvent(
         id=event_id or uuid.uuid4(),
         event_type=GraphEventType.CONCEPT_APPROVED,
-        aggregate_id=concept.id,
+        aggregate_id=require_uuid(concept.id, "concept_id"),
         payload=payload,
         occurred_at=_to_utc(concept.reviewed_at),
     )
@@ -73,7 +79,7 @@ def relation_approved_event(
         "course_id": str(relation.course_id),
         "from_concept_id": str(relation.from_concept_id),
         "to_concept_id": str(relation.to_concept_id),
-        "relation_type": relation.relation_type.value,
+        "relation_type": validate_relation_type(relation.relation_type).value,
         "source_chunk_id": str(relation.source_chunk_id),
         "confidence": relation.confidence,
         "status": relation.status.value,
@@ -83,7 +89,7 @@ def relation_approved_event(
     return GraphOutboxEvent(
         id=event_id or uuid.uuid4(),
         event_type=GraphEventType.RELATION_APPROVED,
-        aggregate_id=relation.id,
+        aggregate_id=require_uuid(relation.id, "relation_id"),
         payload=payload,
         occurred_at=_to_utc(relation.reviewed_at),
     )

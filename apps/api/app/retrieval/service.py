@@ -87,7 +87,7 @@ def _safe_error_message(exception: Exception) -> str:
 
 
 def _route_candidate_traces(
-    candidates: Sequence[DenseCandidate] | Sequence[LexicalCandidate], source: str
+    candidates: Sequence[DenseCandidate | LexicalCandidate], source: str
 ) -> list[CandidateTrace]:
     return [
         CandidateTrace(

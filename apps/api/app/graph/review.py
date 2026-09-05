@@ -11,6 +11,8 @@ from app.graph.domain import (
     ConceptCandidate,
     RelationCandidate,
     RelationType,
+    require_source_chunk,
+    require_uuid,
 )
 from app.graph.errors import GraphCycleError, GraphSelfLoopError
 from app.graph.outbox import (
@@ -52,7 +54,7 @@ class GraphReviewService:
             description=(
                 description if description is not None else candidate.description
             ).strip(),
-            source_chunk_id=candidate.source_chunk_id,
+            source_chunk_id=require_source_chunk(candidate.source_chunk_id),
             confidence=candidate.confidence,
             reviewer_id=reviewer_id,
             reviewed_at=_review_time(reviewed_at),
@@ -91,7 +93,7 @@ class GraphReviewService:
             from_concept_id=effective_candidate.from_concept_id,
             to_concept_id=effective_candidate.to_concept_id,
             relation_type=effective_candidate.relation_type,
-            source_chunk_id=effective_candidate.source_chunk_id,
+            source_chunk_id=require_source_chunk(effective_candidate.source_chunk_id),
             confidence=effective_candidate.confidence,
             reviewer_id=reviewer_id,
             reviewed_at=_review_time(reviewed_at),
@@ -110,7 +112,9 @@ def assert_prerequisite_publishable(
 
     if candidate.relation_type is not RelationType.PREREQUISITE_OF:
         return
-    if candidate.from_concept_id == candidate.to_concept_id:
+    from_id = require_uuid(candidate.from_concept_id, "from_concept_id")
+    to_id = require_uuid(candidate.to_concept_id, "to_concept_id")
+    if from_id == to_id:
         raise GraphSelfLoopError("A concept cannot be its own prerequisite")
 
     adjacency: dict[uuid.UUID, set[uuid.UUID]] = {}
@@ -120,16 +124,12 @@ def assert_prerequisite_publishable(
             or relation.relation_type is not RelationType.PREREQUISITE_OF
         ):
             continue
-        adjacency.setdefault(relation.from_concept_id, set()).add(
-            relation.to_concept_id
-        )
+        adjacency.setdefault(
+            require_uuid(relation.from_concept_id, "from_concept_id"), set()
+        ).add(require_uuid(relation.to_concept_id, "to_concept_id"))
 
     # Adding A -> B closes a cycle exactly when an approved B -> ... -> A path exists.
-    if _is_reachable(
-        adjacency,
-        start=candidate.to_concept_id,
-        target=candidate.from_concept_id,
-    ):
+    if _is_reachable(adjacency, start=to_id, target=from_id):
         raise GraphCycleError("Approving this prerequisite would create a cycle")
 
 

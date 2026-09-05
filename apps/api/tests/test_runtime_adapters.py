@@ -236,3 +236,117 @@ async def test_openai_adapter_posts_structured_prompt_and_parses_fenced_json():
             },
             allowed_citation_labels=(1,),
         )
+
+
+def _fenced_success_response() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "```json\n"
+                            '{"claims":[{"text":"页框数量有限",'
+                            '"citation_labels":[1]}]}\n'
+                            "```"
+                        )
+                    }
+                }
+            ]
+        },
+    )
+
+
+def _retry_prompt() -> GenerationPrompt:
+    return GenerationPrompt(
+        system_instruction="Use only evidence.",
+        user_payload='{"COURSE_EVIDENCE":[]}',
+        allowed_citation_labels=(1,),
+    )
+
+
+class _SleepRecorder:
+    def __init__(self) -> None:
+        self.delays: list[float] = []
+
+    async def __call__(self, delay: float) -> None:
+        self.delays.append(delay)
+
+
+def _retrying_adapter(handler) -> tuple[OpenAICompatibleChatAdapter, _SleepRecorder]:
+    sleep = _SleepRecorder()
+    adapter = OpenAICompatibleChatAdapter(
+        base_url="https://llm.example/v1",
+        api_key="test-key",
+        model="course-chat",
+        sleep=sleep,
+        transport=httpx.MockTransport(handler),
+    )
+    return adapter, sleep
+
+
+async def test_openai_adapter_retries_transient_transport_errors_with_backoff():
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise httpx.ReadTimeout("upstream timed out", request=request)
+        return _fenced_success_response()
+
+    adapter, sleep = _retrying_adapter(handler)
+    draft = await adapter.generate(_retry_prompt())
+
+    assert attempts["count"] == 3
+    assert draft.claims[0].text == "页框数量有限"
+    # Spec §9.2: two retries with exponential backoff (1s, then 2s).
+    assert sleep.delays == [1.0, 2.0]
+
+
+async def test_openai_adapter_retries_retryable_status_codes():
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return httpx.Response(503, json={"error": "unavailable"})
+        return _fenced_success_response()
+
+    adapter, sleep = _retrying_adapter(handler)
+    draft = await adapter.generate(_retry_prompt())
+
+    assert attempts["count"] == 2
+    assert draft.claims[0].citation_labels == [1]
+    assert sleep.delays == [1.0]
+
+
+async def test_openai_adapter_does_not_retry_contract_errors():
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        return httpx.Response(400, json={"error": "bad request"})
+
+    adapter, sleep = _retrying_adapter(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        await adapter.generate(_retry_prompt())
+
+    assert attempts["count"] == 1
+    assert sleep.delays == []
+
+
+async def test_openai_adapter_raises_after_exhausting_retry_budget():
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        raise httpx.ConnectError("connection refused", request=request)
+
+    adapter, sleep = _retrying_adapter(handler)
+    with pytest.raises(httpx.ConnectError):
+        await adapter.generate(_retry_prompt())
+
+    # One initial attempt plus two retries, each preceded by backoff.
+    assert attempts["count"] == 3
+    assert sleep.delays == [1.0, 2.0]

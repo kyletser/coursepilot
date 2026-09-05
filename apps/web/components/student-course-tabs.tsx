@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SendIcon, ShieldIcon } from "@/components/icons";
 import {
@@ -98,6 +98,16 @@ type ChatMessage = {
   intent?: string;
 };
 
+type StoredChatMessage = {
+  id: string;
+  role: string;
+  content: string;
+  intent?: string | null;
+  status?: string | null;
+  error_code?: string | null;
+  citations?: Citation[];
+};
+
 function StudentChat({ course }: { course: Course }) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [content, setContent] = useState("");
@@ -106,6 +116,17 @@ function StudentChat({ course }: { course: Course }) {
   const [stage, setStage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const [recoverable, setRecoverable] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const streamAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    // Abort any in-flight stream when the tab unmounts so the request does not
+    // keep mutating state of an unmounted component.
+    return () => {
+      streamAbortRef.current?.abort();
+    };
+  }, []);
 
   async function ensureSession() {
     if (sessionId) return sessionId;
@@ -129,6 +150,7 @@ function StudentChat({ course }: { course: Course }) {
     if (!question || busy) return;
     setBusy(true);
     setError(null);
+    setRecoverable(false);
     setContent("");
     setStage("正在建立学习会话");
     const assistantId = crypto.randomUUID();
@@ -138,6 +160,8 @@ function StudentChat({ course }: { course: Course }) {
       { id: assistantId, role: "assistant", content: "", citations: [] },
     ]);
 
+    const abortController = new AbortController();
+    streamAbortRef.current = abortController;
     try {
       const activeSessionId = await ensureSession();
       setStage("正在检索课程证据");
@@ -194,17 +218,64 @@ function StudentChat({ course }: { course: Course }) {
             );
           }
         },
+        { signal: abortController.signal },
       );
     } catch (nextError) {
-      setError(nextError);
-      setStage("回答失败");
+      // User-initiated aborts (tab switch / unmount) are not surface errors.
+      const code = nextError instanceof ApiError ? nextError.code : undefined;
+      if (code !== "REQUEST_ABORTED") {
+        setError(nextError);
+        setStage("回答失败");
+        // Mid-stream drops persist a partial/failed turn server-side; offer to
+        // reload that stored history instead of stranding the user.
+        if (
+          code === "CHAT_STREAM_INTERRUPTED" ||
+          code === "CHAT_STREAM_CONNECT_FAILED" ||
+          code === "CHAT_STREAM_FAILED" ||
+          code === "REQUEST_TIMEOUT" ||
+          code === "NETWORK_ERROR"
+        ) {
+          setRecoverable(true);
+        }
+      }
       setMessages((current) =>
         current.filter(
           (message) => message.id !== assistantId || message.content || message.citations.length,
         ),
       );
     } finally {
+      streamAbortRef.current = null;
       setBusy(false);
+    }
+  }
+
+  async function recoverHistory() {
+    if (!sessionId || recovering) return;
+    setRecovering(true);
+    setError(null);
+    try {
+      const stored = await apiRequest<StoredChatMessage[]>(
+        `/chat/sessions/${sessionId}/messages`,
+      );
+      setMessages(
+        stored.map((message) => ({
+          id: message.id,
+          role: message.role === "USER" ? "user" : "assistant",
+          content:
+            message.content ||
+            (message.status === "FAILED"
+              ? `本轮回答未能完成（${message.error_code ?? "处理失败"}），请重新提问。`
+              : ""),
+          citations: message.citations ?? [],
+          intent: message.intent ?? undefined,
+        })),
+      );
+      setRecoverable(false);
+      setStage("已从服务端恢复消息历史");
+    } catch (nextError) {
+      setError(nextError);
+    } finally {
+      setRecovering(false);
     }
   }
 
@@ -352,6 +423,21 @@ function StudentChat({ course }: { course: Course }) {
           </div>
         </aside>
       </div>
+      {recoverable && sessionId ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#b77b2f]/25 bg-[#f9f0e2] p-4 text-sm text-[#6c4a1f]">
+          <p>
+            问答连接中断，服务端可能已保存本轮结果。你可以恢复已存储的消息历史，或重新提问。
+          </p>
+          <button
+            className={secondaryButtonClass}
+            disabled={recovering || busy}
+            onClick={() => void recoverHistory()}
+            type="button"
+          >
+            {recovering ? <Spinner label="正在恢复" /> : "恢复消息历史"}
+          </button>
+        </div>
+      ) : null}
       <ErrorNotice error={error} />
     </div>
   );

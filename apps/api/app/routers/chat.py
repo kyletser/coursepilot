@@ -350,6 +350,7 @@ async def send_chat_message(
 
     backend = build_retrieval_backend(request.app.state, session, index=index)
     chat_adapter = getattr(request.app.state, "chat_adapter", None)
+
     async def event_stream() -> AsyncIterator[str]:
         # Start the response before retrieval/generation so clients receive a
         # real first event immediately and cancellation propagates into work.
@@ -368,6 +369,7 @@ async def send_chat_message(
                 trace_id=trace_id,
             )
         except asyncio.CancelledError:
+
             async def mark_disconnected() -> None:
                 async with request.app.state.session_factory() as cleanup_session:
                     stored = await cleanup_session.get(Message, assistant_message.id)
@@ -471,8 +473,13 @@ async def send_chat_message(
             )
             return
 
-        # Grounding is complete before answer text crosses the trust boundary;
-        # split the verified result into incremental chunks for responsive UI.
+        # Generate-then-stream is intentional, not a missing optimization: the
+        # whole turn (retrieval, claim grounding, refusal checks, citation
+        # persistence) must finish before answer text crosses the trust
+        # boundary. Streaming raw LLM tokens would show students text that may
+        # still be rewritten or rejected by verification, and would make
+        # partial ungrounded answers visible. The verified answer is then split
+        # into incremental chunks purely for responsive UI rendering.
         for offset in range(0, len(response.answer), 48):
             yield _sse("token", {"text": response.answer[offset : offset + 48]})
         for source, record in citation_records:

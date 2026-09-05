@@ -230,7 +230,7 @@ async def test_graph_permissions_and_student_view_never_leaks_pending(
 
 class _RecordingConsumer:
     def __init__(self) -> None:
-        self.events = []
+        self.events: list[object] = []
 
     def consume(self, event) -> None:
         self.events.append(event)
@@ -423,3 +423,228 @@ async def test_publish_is_guarded_and_switches_index_and_ingestion_atomically(
     assert target_status == CourseIndexStatus.ACTIVE
     assert version_status == DocumentVersionStatus.PUBLISHED
     assert job_stage == IngestionStage.PUBLISHED
+
+
+def _batch_review_url(course_id: uuid.UUID) -> str:
+    return f"/api/v1/courses/{course_id}/graph/candidates/batch-review"
+
+
+async def test_batch_review_processes_same_course_candidates_per_item(
+    client, app_instance
+):
+    _, teacher_tokens = await register_and_login(
+        client, "batch-owner@example.com", role="TEACHER"
+    )
+    _, other_teacher_tokens = await register_and_login(
+        client, "batch-other@example.com", role="TEACHER"
+    )
+    _, student_tokens = await register_and_login(
+        client, "batch-student@example.com", role="STUDENT"
+    )
+    course = await create_course(client, teacher_tokens)
+    course_id = uuid.UUID(course["id"])
+    other_course = await create_course(
+        client, other_teacher_tokens, code="CS202", template="OPERATING_SYSTEMS"
+    )
+    _, _, chunk_id = await _seed_material(app_instance, course_id)
+    _, _, other_chunk_id = await _seed_material(
+        app_instance, uuid.UUID(other_course["id"]), logical_name="foreign"
+    )
+    approve_id = await _add_concept(app_instance, course_id, chunk_id, "Batch approve")
+    reject_id = await _add_concept(app_instance, course_id, chunk_id, "Batch reject")
+    foreign_id = await _add_concept(
+        app_instance, uuid.UUID(other_course["id"]), other_chunk_id, "Foreign"
+    )
+
+    url = _batch_review_url(course_id)
+    payload = {
+        "items": [
+            {"kind": "concept", "candidate_id": str(approve_id), "decision": "approve"}
+        ]
+    }
+    student_denied = await client.post(
+        url, headers=auth_headers(student_tokens), json=payload
+    )
+    assert student_denied.status_code == 403
+    other_denied = await client.post(
+        url, headers=auth_headers(other_teacher_tokens), json=payload
+    )
+    assert other_denied.status_code == 403
+
+    response = await client.post(
+        url,
+        headers=auth_headers(teacher_tokens),
+        json={
+            "items": [
+                {
+                    "kind": "concept",
+                    "candidate_id": str(approve_id),
+                    "decision": "approve",
+                    "name": "Renamed in batch",
+                },
+                {
+                    "kind": "concept",
+                    "candidate_id": str(reject_id),
+                    "decision": "reject",
+                },
+                {
+                    "kind": "concept",
+                    "candidate_id": str(foreign_id),
+                    "decision": "approve",
+                },
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["summary"] == {"total": 3, "approved": 1, "rejected": 1, "failed": 1}
+    entries = {entry["candidate_id"]: entry for entry in data["items"]}
+    assert entries[str(approve_id)]["status"] == "ok"
+    assert entries[str(approve_id)]["data"]["name"] == "Renamed in batch"
+    assert entries[str(reject_id)]["status"] == "ok"
+    assert entries[str(reject_id)]["data"]["status"] == "REJECTED"
+    foreign_entry = entries[str(foreign_id)]
+    assert foreign_entry["status"] == "error"
+    assert foreign_entry["data"] is None
+    assert foreign_entry["error"]["code"] == "GRAPH_CONCEPT_NOT_FOUND"
+
+    async with app_instance.state.session_factory() as session:
+        approved_status = await session.scalar(
+            select(ConceptCandidate.status).where(ConceptCandidate.id == approve_id)
+        )
+        rejected_status = await session.scalar(
+            select(ConceptCandidate.status).where(ConceptCandidate.id == reject_id)
+        )
+        foreign_status = await session.scalar(
+            select(ConceptCandidate.status).where(ConceptCandidate.id == foreign_id)
+        )
+    assert approved_status == ReviewStatus.APPROVED
+    assert rejected_status == ReviewStatus.REJECTED
+    # The foreign candidate must be untouched by another course's batch.
+    assert foreign_status == ReviewStatus.PENDING
+
+
+async def test_batch_review_blocks_prerequisite_cycle_across_items(
+    client, app_instance
+):
+    _, teacher_tokens = await register_and_login(
+        client, "batch-cycle@example.com", role="TEACHER"
+    )
+    course = await create_course(client, teacher_tokens)
+    course_id = uuid.UUID(course["id"])
+    _, _, chunk_id = await _seed_material(app_instance, course_id)
+    first_id = await _add_concept(
+        app_instance,
+        course_id,
+        chunk_id,
+        "First",
+        status=ReviewStatus.APPROVED,
+    )
+    second_id = await _add_concept(
+        app_instance,
+        course_id,
+        chunk_id,
+        "Second",
+        status=ReviewStatus.APPROVED,
+    )
+    forward_id = await _add_relation(
+        app_instance, course_id, chunk_id, first_id, second_id
+    )
+    backward_id = await _add_relation(
+        app_instance, course_id, chunk_id, second_id, first_id
+    )
+
+    response = await client.post(
+        _batch_review_url(course_id),
+        headers=auth_headers(teacher_tokens),
+        json={
+            "items": [
+                {
+                    "kind": "relation",
+                    "candidate_id": str(forward_id),
+                    "decision": "approve",
+                },
+                {
+                    "kind": "relation",
+                    "candidate_id": str(backward_id),
+                    "decision": "approve",
+                },
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["summary"] == {"total": 2, "approved": 1, "rejected": 0, "failed": 1}
+    entries = {entry["candidate_id"]: entry for entry in data["items"]}
+    assert entries[str(forward_id)]["status"] == "ok"
+    # The second item must see the first item's approval within the same batch.
+    assert entries[str(backward_id)]["status"] == "error"
+    assert entries[str(backward_id)]["error"]["code"] == "GRAPH_PREREQUISITE_CYCLE"
+
+    async with app_instance.state.session_factory() as session:
+        backward_status = await session.scalar(
+            select(RelationCandidate.status).where(RelationCandidate.id == backward_id)
+        )
+    assert backward_status == ReviewStatus.PENDING
+
+
+async def test_batch_review_request_validation(client, app_instance):
+    _, teacher_tokens = await register_and_login(
+        client, "batch-validation@example.com", role="TEACHER"
+    )
+    course = await create_course(client, teacher_tokens)
+    url = _batch_review_url(uuid.UUID(course["id"]))
+    candidate_id = str(uuid.uuid4())
+
+    empty = await client.post(
+        url, headers=auth_headers(teacher_tokens), json={"items": []}
+    )
+    assert empty.status_code == 422
+
+    duplicates = await client.post(
+        url,
+        headers=auth_headers(teacher_tokens),
+        json={
+            "items": [
+                {
+                    "kind": "concept",
+                    "candidate_id": candidate_id,
+                    "decision": "approve",
+                },
+                {"kind": "concept", "candidate_id": candidate_id, "decision": "reject"},
+            ]
+        },
+    )
+    assert duplicates.status_code == 422
+
+    misplaced = await client.post(
+        url,
+        headers=auth_headers(teacher_tokens),
+        json={
+            "items": [
+                {
+                    "kind": "relation",
+                    "candidate_id": candidate_id,
+                    "decision": "approve",
+                    "name": "not allowed here",
+                }
+            ]
+        },
+    )
+    assert misplaced.status_code == 422
+
+    oversize = await client.post(
+        url,
+        headers=auth_headers(teacher_tokens),
+        json={
+            "items": [
+                {
+                    "kind": "concept",
+                    "candidate_id": str(uuid.uuid4()),
+                    "decision": "approve",
+                }
+                for _ in range(51)
+            ]
+        },
+    )
+    assert oversize.status_code == 422

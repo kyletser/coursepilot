@@ -35,7 +35,8 @@ class ApprovedGraphQuery:
 
     def compile(self) -> tuple[str, dict[str, object]]:
         relation_types = "|".join(
-            item.value for item in dict.fromkeys(self.relation_types)
+            validate_relation_type(item).value
+            for item in dict.fromkeys(self.relation_types)
         )
         # Depth and relationship tokens are validated enums/integers, never raw input.
         cypher = f"""

@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend tests and migration
+    name: Backend lint, typecheck, tests and migration
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -56,6 +56,15 @@ jobs:
 
       - name: Install backend dependencies
         run: python -m pip install --disable-pip-version-check -e ".[test]"
+
+      - name: Lint backend
+        run: ruff check app tests
+
+      - name: Check backend formatting
+        run: ruff format --check app tests
+
+      - name: Typecheck backend
+        run: mypy
 
       - name: Apply migrations on a clean database
         run: alembic upgrade head

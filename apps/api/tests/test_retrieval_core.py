@@ -154,7 +154,7 @@ class _FakeEmbeddingModel:
 
 class _FakeRerankerModel:
     def __init__(self) -> None:
-        self.calls = []
+        self.calls: list[object] = []
 
     def predict(self, pairs, **kwargs):
         self.calls.append(pairs)

@@ -263,7 +263,7 @@ def _document_payload(
 async def _duplicate_for_course(
     session: AsyncSession, course_id: uuid.UUID, sha256: str
 ) -> tuple[Document, DocumentVersion, IngestionJob | None] | None:
-    return (
+    row = (
         await session.execute(
             select(Document, DocumentVersion, IngestionJob)
             .join(
@@ -276,6 +276,10 @@ async def _duplicate_for_course(
             .limit(1)
         )
     ).one_or_none()
+    if row is None:
+        return None
+    document, version, job = row
+    return document, version, job
 
 
 async def _dispatch(request: Request, job_id: uuid.UUID) -> None:
@@ -367,10 +371,10 @@ async def upload_document(
 
     duplicate = await _duplicate_for_course(session, course_id, digest)
     if duplicate is not None:
-        document, version, job = duplicate
+        dup_document, dup_version, dup_job = duplicate
         return success_response(
             request,
-            _document_payload(document, version, job, duplicate=True),
+            _document_payload(dup_document, dup_version, dup_job, duplicate=True),
         )
 
     document = await session.scalar(

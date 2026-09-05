@@ -11,19 +11,41 @@ import sys
 import time
 import uuid
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from pydantic import ValidationError
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
+from app.agent.adapters import build_openai_chat_adapter
+from app.agent.core import TrustedAgentCore
+from app.agent.grounding import lexical_claim_support
+from app.agent.routing import ValidatedIntentRouter
+from app.agent.schemas import AgentRequest, AgentStatus, Intent
+from app.agent.service import CourseMaterialEvidenceRetriever
 from app.config import Settings, get_settings
 from app.db import create_engine, create_session_factory
 from app.evaluation.service import _active_cases, _domain_snapshot, create_run
+from app.learning.prerequisites import (
+    MAX_PREREQUISITE_DEPTH,
+    WEAK_MASTERY_THRESHOLD,
+    PrerequisiteCycleError,
+    PrerequisiteSelfLoopError,
+    TargetConceptNotApprovedError,
+    TargetConceptNotFoundError,
+    plan_learning_path,
+)
+from app.learning.prerequisites import (
+    Concept as DomainConcept,
+)
+from app.learning.prerequisites import (
+    PrerequisiteRelation as DomainPrerequisiteRelation,
+)
 from app.models import (
     Chunk,
     ConceptCandidate,
@@ -40,6 +62,7 @@ from app.models import (
     EvalDataset,
     EvalDatasetStatus,
     EvalDatasetType,
+    EvalRun,
     IndexComponentStatus,
     MasteryState,
     RecordStatus,
@@ -77,6 +100,17 @@ class EvaluationRunnerError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.details = dict(details or {})
+
+
+def _require_frozen_at(dataset: EvalDataset) -> datetime:
+    """Return the recorded freeze time; FROZEN validation happens upstream."""
+
+    if dataset.frozen_at is None:
+        raise EvaluationRunnerError(
+            "EVAL_DATASET_NOT_FROZEN",
+            "The dataset must be FROZEN with a recorded freeze time",
+        )
+    return dataset.frozen_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,7 +380,7 @@ def _case_query(case: EvalCase) -> str:
         raise _case_error(
             case,
             "EVAL_CASE_QUERY_MISSING",
-            "Every retrieval case must provide input.query",
+            "Every evaluation case must provide input.query",
         )
     return query.strip()
 
@@ -833,9 +867,11 @@ async def run_three_baselines(
         course = await session.scalar(
             select(Course).where(Course.id == dataset.course_id)
         )
-        teacher = await session.scalar(
-            select(User).where(User.id == course.owner_id if course else False)
-        )
+        teacher: User | None = None
+        if course is not None:
+            teacher = await session.scalar(
+                select(User).where(User.id == course.owner_id)
+            )
         if course is None or teacher is None or teacher.role != UserRole.TEACHER:
             raise EvaluationRunnerError(
                 "EVAL_COURSE_OWNER_INVALID",
@@ -902,7 +938,9 @@ async def run_three_baselines(
                 "The provider factory must report model versions",
             )
 
-        snapshot = _domain_snapshot(dataset, cases, frozen_at=dataset.frozen_at)
+        snapshot = _domain_snapshot(
+            dataset, cases, frozen_at=_require_frozen_at(dataset)
+        )
         selected_report_version = report_version or _report_version(
             dataset, index_version, generated
         )
@@ -994,7 +1032,9 @@ async def run_three_baselines(
                 "id": str(dataset.id),
                 "type": dataset.type.value,
                 "version": dataset.version,
-                "frozen_at": dataset.frozen_at.isoformat().replace("+00:00", "Z"),
+                "frozen_at": _require_frozen_at(dataset)
+                .isoformat()
+                .replace("+00:00", "Z"),
                 "content_sha256": snapshot.content_sha256,
                 "case_count": len(cases),
             },
@@ -1018,6 +1058,1073 @@ async def run_three_baselines(
         }
         report_path = _write_report(output_dir, selected_report_version, report)
         return ThreeBaselineResult(report_path, report, run_ids)
+
+
+CASE_EVALUATION_REPORT_SCHEMA_VERSION = "coursepilot.case-evaluation-report/1.0.0"
+DETERMINISTIC_ROUTER_VERSION = "coursepilot-deterministic-intent-rules/v1"
+PATH_PLANNER_VERSION = "coursepilot-prerequisite-topological-planner/v1"
+LEXICAL_GROUNDING_VERSION = "coursepilot-lexical-claim-support/v1"
+NO_GENERATION_QA_VERSION = "no-generation/evidence-only-summary/v1"
+
+
+@dataclass(frozen=True, slots=True)
+class CaseEvaluationResult:
+    report_path: Path
+    report: Mapping[str, Any]
+    eval_run_id: uuid.UUID
+
+
+def _required_uuid(case: EvalCase, raw: object, code: str, field: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(str(raw))
+    except (TypeError, ValueError) as exc:
+        raise _case_error(
+            case,
+            code,
+            f"input.{field} must be a UUID",
+        ) from exc
+
+
+def _optional_int(
+    case: EvalCase, raw: object, field: str, *, default: int, minimum: int, maximum: int
+) -> int:
+    if raw is None:
+        return default
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise _case_error(
+            case,
+            "EVAL_CASE_PARAMETER_INVALID",
+            f"input.{field} must be an integer",
+        )
+    if not minimum <= raw <= maximum:
+        raise _case_error(
+            case,
+            "EVAL_CASE_PARAMETER_INVALID",
+            f"input.{field} must be between {minimum} and {maximum}",
+        )
+    return raw
+
+
+def _optional_float(
+    case: EvalCase,
+    raw: object,
+    field: str,
+    *,
+    default: float,
+    minimum: float = 0.0,
+    maximum: float = 1.0,
+) -> float:
+    if raw is None:
+        return default
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise _case_error(
+            case,
+            "EVAL_CASE_PARAMETER_INVALID",
+            f"input.{field} must be a number",
+        )
+    value = float(raw)
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise _case_error(
+            case,
+            "EVAL_CASE_PARAMETER_INVALID",
+            f"input.{field} must be between {minimum} and {maximum}",
+        )
+    return value
+
+
+def _canonical_chunk_id_set(case: EvalCase, raw: object, field: str) -> frozenset[str]:
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+        raise _case_error(
+            case,
+            "EVAL_CASE_PARAMETER_INVALID",
+            f"{field} must be an array of chunk ids",
+        )
+    canonical: set[str] = set()
+    for item in raw:
+        try:
+            canonical.add(str(uuid.UUID(str(item))))
+        except (TypeError, ValueError) as exc:
+            raise _case_error(
+                case,
+                "EVAL_CASE_PARAMETER_INVALID",
+                f"{field} must contain UUID chunk ids",
+            ) from exc
+    return frozenset(canonical)
+
+
+async def _case_evaluation_context(
+    session: AsyncSession,
+    *,
+    dataset_id: uuid.UUID,
+    index_version: int,
+    expected_type: EvalDatasetType,
+    require_retrieval_components: bool,
+) -> tuple[EvalDataset, CourseIndex, list[EvalCase], User]:
+    dataset = await session.scalar(
+        select(EvalDataset).where(
+            EvalDataset.id == dataset_id,
+            EvalDataset.deleted_at.is_(None),
+        )
+    )
+    if dataset is None:
+        raise EvaluationRunnerError(
+            "EVAL_DATASET_NOT_FOUND", "Evaluation dataset not found"
+        )
+    if dataset.type != expected_type:
+        raise EvaluationRunnerError(
+            "EVAL_DATASET_TYPE_INVALID",
+            f"This runner only accepts {expected_type.value} datasets",
+        )
+    if dataset.status != EvalDatasetStatus.FROZEN or dataset.frozen_at is None:
+        raise EvaluationRunnerError(
+            "EVAL_DATASET_NOT_FROZEN", "The case runner requires a FROZEN dataset"
+        )
+    course = await session.scalar(select(Course).where(Course.id == dataset.course_id))
+    teacher: User | None = None
+    if course is not None:
+        teacher = await session.scalar(select(User).where(User.id == course.owner_id))
+    if course is None or teacher is None or teacher.role != UserRole.TEACHER:
+        raise EvaluationRunnerError(
+            "EVAL_COURSE_OWNER_INVALID",
+            "The dataset course has no valid teacher owner",
+        )
+    course_index = await session.scalar(
+        select(CourseIndex).where(
+            CourseIndex.course_id == dataset.course_id,
+            CourseIndex.version == index_version,
+            CourseIndex.deleted_at.is_(None),
+        )
+    )
+    if course_index is None:
+        raise EvaluationRunnerError(
+            "EVAL_INDEX_NOT_FOUND", "The selected course index was not found"
+        )
+    if course_index.status not in {
+        CourseIndexStatus.READY,
+        CourseIndexStatus.ACTIVE,
+    }:
+        raise EvaluationRunnerError(
+            "EVAL_INDEX_NOT_READY",
+            "The selected course index must be READY or ACTIVE",
+        )
+    if require_retrieval_components:
+        if course_index.dense_status != IndexComponentStatus.READY:
+            raise EvaluationRunnerError(
+                "EVAL_DENSE_INDEX_NOT_READY",
+                "End-to-end QA evaluation requires a READY dense index",
+            )
+        if course_index.lexical_status != IndexComponentStatus.READY:
+            raise EvaluationRunnerError(
+                "EVAL_LEXICAL_INDEX_NOT_READY",
+                "End-to-end QA evaluation requires a READY lexical index",
+            )
+    cases = await _active_cases(session, dataset.id)
+    if not cases:
+        raise EvaluationRunnerError(
+            "EVAL_DATASET_EMPTY", "The frozen dataset has no active cases"
+        )
+    return dataset, course_index, cases, teacher
+
+
+def _case_report_payload(
+    *,
+    dataset: EvalDataset,
+    course_index: CourseIndex,
+    snapshot: Any,
+    selected_report_version: str,
+    generated: datetime,
+    git_commit: str,
+    git_dirty: bool,
+    model_versions: Mapping[str, str],
+    prompt_version: str,
+    runner_parameters: Mapping[str, Any],
+    hardware_details: Mapping[str, Any],
+    run: EvalRun,
+    case_results: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": CASE_EVALUATION_REPORT_SCHEMA_VERSION,
+        "report_version": selected_report_version,
+        "generated_at": generated.isoformat().replace("+00:00", "Z"),
+        "dataset": {
+            "id": str(dataset.id),
+            "type": dataset.type.value,
+            "version": dataset.version,
+            "frozen_at": _require_frozen_at(dataset).isoformat().replace("+00:00", "Z"),
+            "content_sha256": snapshot.content_sha256,
+            "case_count": len(case_results),
+        },
+        "course_index": {
+            "id": str(course_index.id),
+            "course_id": str(course_index.course_id),
+            "version": course_index.version,
+            "status": course_index.status.value,
+            "dense_status": course_index.dense_status.value,
+            "lexical_status": course_index.lexical_status.value,
+        },
+        "provenance": {
+            "git_commit": git_commit,
+            "git_dirty": git_dirty,
+            "model_versions": dict(model_versions),
+            "prompt_version": prompt_version,
+            "retrieval_parameters": dict(runner_parameters),
+            "hardware": dict(hardware_details),
+        },
+        "eval_run_id": str(run.id),
+        "metrics": run.metrics,
+        "case_results": dict(case_results),
+    }
+
+
+def _resolve_git_provenance(
+    git_commit: str | None, git_dirty: bool | None
+) -> tuple[str, bool]:
+    if git_commit is None:
+        commit, discovered_dirty = _git_provenance()
+        return commit, discovered_dirty if git_dirty is None else git_dirty
+    if not git_commit.strip():
+        raise ValueError("git_commit must not be blank")
+    return git_commit, bool(git_dirty)
+
+
+async def _persist_case_run(
+    session: AsyncSession,
+    *,
+    dataset: EvalDataset,
+    teacher: User,
+    index_version: int,
+    model_versions: Mapping[str, str],
+    prompt_version: str,
+    runner_parameters: Mapping[str, Any],
+    hardware_details: Mapping[str, Any],
+    git_commit: str,
+    git_dirty: bool,
+    selected_report_version: str,
+    duration_ms: float,
+    case_results: Mapping[str, Any],
+) -> EvalRun:
+    raw_config = {
+        "git_commit": git_commit,
+        "dataset_version": dataset.version,
+        "index_version": index_version,
+        "model_versions": dict(model_versions),
+        "prompt_version": prompt_version,
+        "retrieval_parameters": dict(runner_parameters),
+        "hardware": dict(hardware_details),
+        "experiment": dataset.type.value,
+        "report_version": selected_report_version,
+        "git_dirty": git_dirty,
+        "duration_ms": round(duration_ms, 3),
+    }
+    return await create_run(
+        session,
+        dataset_id=dataset.id,
+        teacher=teacher,
+        raw_config=raw_config,
+        case_results=case_results,
+    )
+
+
+def _optional_intent(case: EvalCase, raw: object) -> Intent | None:
+    if raw is None:
+        return None
+    try:
+        return Intent(str(raw).strip())
+    except ValueError as exc:
+        raise _case_error(
+            case,
+            "EVAL_ROUTING_REQUESTED_INTENT_INVALID",
+            "input.requested_intent must be a known intent",
+        ) from exc
+
+
+def _optional_target_concepts(case: EvalCase, raw: object) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+        raise _case_error(
+            case,
+            "EVAL_ROUTING_TARGETS_INVALID",
+            "input.target_concepts must be an array of concept names",
+        )
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+async def run_intent_routing_evaluation(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    dataset_id: uuid.UUID,
+    index_version: int,
+    output_dir: str | Path,
+    git_commit: str | None = None,
+    git_dirty: bool | None = None,
+    report_version: str | None = None,
+    prompt_version: str = "no-generation/intent-routing-eval-v1",
+    generated_at: datetime | None = None,
+    hardware: Mapping[str, Any] | None = None,
+) -> CaseEvaluationResult:
+    """Measure the deterministic intent router against a frozen routing dataset.
+
+    Each case output records the ``predicted_intent`` the router selects for the
+    frozen query; the metric layer compares it with the labeled intent.
+    """
+
+    if index_version < 1:
+        raise ValueError("index_version must be positive")
+    generated = (generated_at or datetime.now(UTC)).astimezone(UTC)
+    commit, dirty = _resolve_git_provenance(git_commit, git_dirty)
+    hardware_details = dict(hardware or _hardware_provenance())
+    runner_parameters = {
+        "router_model": DETERMINISTIC_ROUTER_VERSION,
+        "llm_classifier": "not-wired",
+    }
+    model_versions = {"router": DETERMINISTIC_ROUTER_VERSION}
+
+    async with session_factory() as session:
+        dataset, course_index, cases, teacher = await _case_evaluation_context(
+            session,
+            dataset_id=dataset_id,
+            index_version=index_version,
+            expected_type=EvalDatasetType.INTENT_ROUTING,
+            require_retrieval_components=False,
+        )
+        router = ValidatedIntentRouter()
+        case_results: dict[str, Any] = {}
+        started = time.perf_counter()
+        for case in cases:
+            query = _case_query(case)
+            try:
+                request = AgentRequest(
+                    course_id=str(dataset.course_id),
+                    query=query,
+                    requested_intent=_optional_intent(
+                        case, case.input.get("requested_intent")
+                    ),
+                    target_concepts=_optional_target_concepts(
+                        case, case.input.get("target_concepts")
+                    ),
+                    active_index_version=str(index_version),
+                )
+            except ValidationError as exc:
+                raise _case_error(
+                    case,
+                    "EVAL_CASE_INPUT_INVALID",
+                    "The routing case input cannot build an AgentRequest",
+                ) from exc
+            route = await router.route(request)
+            case_results[case.case_key] = {
+                "predicted_intent": route.intent.value,
+                "needs_retrieval": route.needs_retrieval,
+                "route_reason": route.reason,
+            }
+        duration_ms = (time.perf_counter() - started) * 1000
+
+        snapshot = _domain_snapshot(
+            dataset, cases, frozen_at=_require_frozen_at(dataset)
+        )
+        selected_report_version = report_version or _report_version(
+            dataset, index_version, generated
+        )
+        run = await _persist_case_run(
+            session,
+            dataset=dataset,
+            teacher=teacher,
+            index_version=index_version,
+            model_versions=model_versions,
+            prompt_version=prompt_version,
+            runner_parameters=runner_parameters,
+            hardware_details=hardware_details,
+            git_commit=commit,
+            git_dirty=dirty,
+            selected_report_version=selected_report_version,
+            duration_ms=duration_ms,
+            case_results=case_results,
+        )
+        report = _case_report_payload(
+            dataset=dataset,
+            course_index=course_index,
+            snapshot=snapshot,
+            selected_report_version=selected_report_version,
+            generated=generated,
+            git_commit=commit,
+            git_dirty=dirty,
+            model_versions=model_versions,
+            prompt_version=prompt_version,
+            runner_parameters=runner_parameters,
+            hardware_details=hardware_details,
+            run=run,
+            case_results=case_results,
+        )
+        report_path = _write_report(output_dir, selected_report_version, report)
+        return CaseEvaluationResult(report_path, report, run.id)
+
+
+async def run_learning_path_evaluation(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    dataset_id: uuid.UUID,
+    index_version: int,
+    output_dir: str | Path,
+    git_commit: str | None = None,
+    git_dirty: bool | None = None,
+    report_version: str | None = None,
+    prompt_version: str = "no-generation/learning-path-eval-v1",
+    generated_at: datetime | None = None,
+    hardware: Mapping[str, Any] | None = None,
+) -> CaseEvaluationResult:
+    """Measure the approved-graph learning-path planner against frozen cases.
+
+    Each case supplies ``input.student_id`` and ``input.target_concept_id``; the
+    runner plans a path from the concepts and prerequisite relations approved in
+    the selected index and the student's actual mastery states.
+    """
+
+    if index_version < 1:
+        raise ValueError("index_version must be positive")
+    generated = (generated_at or datetime.now(UTC)).astimezone(UTC)
+    commit, dirty = _resolve_git_provenance(git_commit, git_dirty)
+    hardware_details = dict(hardware or _hardware_provenance())
+    runner_parameters = {
+        "path_planner": PATH_PLANNER_VERSION,
+        "mastery_model": "beta-bernoulli-mastery/v1",
+        "graph_source": "postgres-approved-review-records/v1",
+    }
+    model_versions = {
+        "path_planner": PATH_PLANNER_VERSION,
+        "mastery": "beta-bernoulli-mastery/v1",
+        "graph": "postgres-approved-review-records/v1",
+    }
+
+    async with session_factory() as session:
+        dataset, course_index, cases, teacher = await _case_evaluation_context(
+            session,
+            dataset_id=dataset_id,
+            index_version=index_version,
+            expected_type=EvalDatasetType.LEARNING_PATH,
+            require_retrieval_components=False,
+        )
+        concepts = list(
+            (
+                await session.scalars(
+                    select(ConceptCandidate).where(
+                        ConceptCandidate.course_id == dataset.course_id,
+                        ConceptCandidate.index_id == course_index.id,
+                        ConceptCandidate.status == ReviewStatus.APPROVED,
+                        ConceptCandidate.deleted_at.is_(None),
+                    )
+                )
+            ).all()
+        )
+        concept_map = {concept.id: concept for concept in concepts}
+        relations = tuple(
+            relation
+            for relation in (
+                await session.scalars(
+                    select(RelationCandidate).where(
+                        RelationCandidate.course_id == dataset.course_id,
+                        RelationCandidate.status == ReviewStatus.APPROVED,
+                        RelationCandidate.deleted_at.is_(None),
+                    )
+                )
+            ).all()
+            if relation.from_candidate_id in concept_map
+            and relation.to_candidate_id in concept_map
+        )
+        domain_concepts = [
+            DomainConcept(concept_id=concept.id, status="APPROVED")
+            for concept in concepts
+        ]
+        domain_relations = [
+            DomainPrerequisiteRelation(
+                prerequisite_id=relation.from_candidate_id,
+                concept_id=relation.to_candidate_id,
+                status="APPROVED",
+                relation_type=relation.type.value,
+            )
+            for relation in relations
+        ]
+
+        case_results: dict[str, Any] = {}
+        started = time.perf_counter()
+        for case in cases:
+            student_id = _required_uuid(
+                case,
+                case.input.get("student_id"),
+                "EVAL_PATH_STUDENT_MISSING",
+                "student_id",
+            )
+            target_id = _required_uuid(
+                case,
+                case.input.get("target_concept_id"),
+                "EVAL_PATH_TARGET_MISSING",
+                "target_concept_id",
+            )
+            max_depth = _optional_int(
+                case,
+                case.input.get("max_depth"),
+                "max_depth",
+                default=MAX_PREREQUISITE_DEPTH,
+                minimum=0,
+                maximum=MAX_PREREQUISITE_DEPTH,
+            )
+            weak_threshold = _optional_float(
+                case,
+                case.input.get("weak_threshold"),
+                "weak_threshold",
+                default=WEAK_MASTERY_THRESHOLD,
+            )
+            enrollment = await session.scalar(
+                select(Enrollment.id).where(
+                    Enrollment.course_id == dataset.course_id,
+                    Enrollment.student_id == student_id,
+                    Enrollment.status == EnrollmentStatus.ACTIVE,
+                )
+            )
+            if enrollment is None:
+                raise _case_error(
+                    case,
+                    "EVAL_PATH_STUDENT_NOT_ENROLLED",
+                    "input.student_id is not actively enrolled in the dataset course",
+                )
+            if target_id not in concept_map:
+                known = await session.scalar(
+                    select(ConceptCandidate.id).where(
+                        ConceptCandidate.id == target_id,
+                        ConceptCandidate.course_id == dataset.course_id,
+                        ConceptCandidate.deleted_at.is_(None),
+                    )
+                )
+                if known is None:
+                    raise _case_error(
+                        case,
+                        "EVAL_PATH_TARGET_NOT_FOUND",
+                        "input.target_concept_id does not exist in the dataset course",
+                    )
+                raise _case_error(
+                    case,
+                    "EVAL_PATH_TARGET_NOT_APPROVED",
+                    "Every target concept must be APPROVED in the selected index",
+                )
+            mastery_rows = list(
+                (
+                    await session.scalars(
+                        select(MasteryState).where(
+                            MasteryState.course_id == dataset.course_id,
+                            MasteryState.student_id == student_id,
+                            MasteryState.status == RecordStatus.ACTIVE,
+                            MasteryState.deleted_at.is_(None),
+                        )
+                    )
+                ).all()
+            )
+            mastery_by_concept: dict[Hashable, float] = {
+                row.concept_id: float(row.mastery) for row in mastery_rows
+            }
+            try:
+                path = plan_learning_path(
+                    target_id,
+                    domain_concepts,
+                    domain_relations,
+                    mastery_by_concept,
+                    max_depth=max_depth,
+                    weak_threshold=weak_threshold,
+                )
+            except TargetConceptNotFoundError as exc:
+                raise _case_error(
+                    case,
+                    "EVAL_PATH_TARGET_NOT_FOUND",
+                    "input.target_concept_id does not exist in the dataset course",
+                ) from exc
+            except TargetConceptNotApprovedError as exc:
+                raise _case_error(
+                    case,
+                    "EVAL_PATH_TARGET_NOT_APPROVED",
+                    "Every target concept must be APPROVED in the selected index",
+                ) from exc
+            except (PrerequisiteCycleError, PrerequisiteSelfLoopError) as exc:
+                raise _case_error(
+                    case,
+                    "EVAL_PATH_PREREQUISITE_CYCLE",
+                    "The approved prerequisite graph contains a cycle",
+                ) from exc
+            case_results[case.case_key] = {
+                "predicted_concept_ids": [str(item) for item in path.concept_ids],
+                "target_concept_id": str(target_id),
+                "student_id": str(student_id),
+                "max_depth": max_depth,
+                "weak_threshold": weak_threshold,
+                "steps": [
+                    {
+                        "concept_id": str(step.concept_id),
+                        "mastery": step.mastery,
+                        "is_weak": step.is_weak,
+                        "depth": step.depth,
+                        "reason": step.reason,
+                    }
+                    for step in path.steps
+                ],
+            }
+        duration_ms = (time.perf_counter() - started) * 1000
+
+        snapshot = _domain_snapshot(
+            dataset, cases, frozen_at=_require_frozen_at(dataset)
+        )
+        selected_report_version = report_version or _report_version(
+            dataset, index_version, generated
+        )
+        run = await _persist_case_run(
+            session,
+            dataset=dataset,
+            teacher=teacher,
+            index_version=index_version,
+            model_versions=model_versions,
+            prompt_version=prompt_version,
+            runner_parameters=runner_parameters,
+            hardware_details=hardware_details,
+            git_commit=commit,
+            git_dirty=dirty,
+            selected_report_version=selected_report_version,
+            duration_ms=duration_ms,
+            case_results=case_results,
+        )
+        report = _case_report_payload(
+            dataset=dataset,
+            course_index=course_index,
+            snapshot=snapshot,
+            selected_report_version=selected_report_version,
+            generated=generated,
+            git_commit=commit,
+            git_dirty=dirty,
+            model_versions=model_versions,
+            prompt_version=prompt_version,
+            runner_parameters=runner_parameters,
+            hardware_details=hardware_details,
+            run=run,
+            case_results=case_results,
+        )
+        report_path = _write_report(output_dir, selected_report_version, report)
+        return CaseEvaluationResult(report_path, report, run.id)
+
+
+@dataclass(frozen=True, slots=True)
+class _LabeledClaim:
+    text: str
+    supporting_chunk_ids: frozenset[str] | None
+
+
+def _qa_labeled_claims(case: EvalCase) -> dict[str, _LabeledClaim]:
+    raw = case.labels.get("claims")
+    if raw is None:
+        raw = case.expected.get("claims")
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise _case_error(
+            case,
+            "EVAL_QA_CLAIMS_INVALID",
+            "claims labels must map claim ids to labeled claim records",
+        )
+    labeled: dict[str, _LabeledClaim] = {}
+    for claim_id, record in raw.items():
+        if not isinstance(claim_id, str) or not claim_id.strip():
+            raise _case_error(
+                case,
+                "EVAL_QA_CLAIMS_INVALID",
+                "claim ids must be non-blank strings",
+            )
+        if not isinstance(record, Mapping):
+            raise _case_error(
+                case,
+                "EVAL_QA_CLAIMS_INVALID",
+                f"claim {claim_id} must be an object with a text field",
+            )
+        text = record.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise _case_error(
+                case,
+                "EVAL_QA_CLAIMS_INVALID",
+                f"claim {claim_id} needs a non-blank text label",
+            )
+        supporting_raw = record.get("supporting_chunk_ids")
+        supporting: frozenset[str] | None = None
+        if supporting_raw is not None:
+            supporting = _canonical_chunk_id_set(
+                case, supporting_raw, f"claims.{claim_id}.supporting_chunk_ids"
+            )
+        labeled[claim_id.strip()] = _LabeledClaim(
+            text=text.strip(), supporting_chunk_ids=supporting
+        )
+    return labeled
+
+
+def _qa_judgments(
+    response: Any,
+    *,
+    labeled_claims: Mapping[str, _LabeledClaim],
+    scope: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Deterministically judge every cited (claim, chunk) pair in the answer.
+
+    Citation accuracy must stay deterministic (spec §11.3), so ``supports_claim``
+    comes from frozen human labels when available and only falls back to the same
+    lexical support checker the grounding verifier uses at runtime.
+    """
+
+    evidence_chunks = {item.chunk_id for item in response.evidence}
+    evidence_text = {item.chunk_id: item.text for item in response.evidence}
+    judgments: list[dict[str, Any]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for citation in response.citations:
+        if not citation.claim_indices:
+            continue
+        generated_texts = [
+            response.claims[index].text
+            for index in citation.claim_indices
+            if index < len(response.claims)
+        ]
+        for claim_id, labeled in labeled_claims.items():
+            attributed = any(
+                lexical_claim_support(labeled.text, generated_text)
+                for generated_text in generated_texts
+            )
+            if not attributed:
+                continue
+            pair = (claim_id, citation.chunk_id)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            if labeled.supporting_chunk_ids is not None:
+                supports = citation.chunk_id in labeled.supporting_chunk_ids
+            else:
+                supports = lexical_claim_support(
+                    labeled.text, evidence_text.get(citation.chunk_id, "")
+                )
+            judgments.append(
+                {
+                    "claim_id": claim_id,
+                    "citation_id": citation.chunk_id,
+                    "citation_exists": citation.chunk_id in evidence_chunks,
+                    "belongs_to_expected_scope": citation.chunk_id in scope,
+                    "supports_claim": supports,
+                }
+            )
+    return judgments
+
+
+async def run_end_to_end_qa_evaluation(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    dataset_id: uuid.UUID,
+    index_version: int,
+    output_dir: str | Path,
+    provider_factory: EvaluationProviderFactory | None = None,
+    chat_adapter_factory: Callable[[], Any] | None = None,
+    git_commit: str | None = None,
+    git_dirty: bool | None = None,
+    report_version: str | None = None,
+    prompt_version: str = "coursepilot-trusted-core/grounded-render-v1",
+    generated_at: datetime | None = None,
+    hardware: Mapping[str, Any] | None = None,
+    route_top_k: int = 20,
+    fusion_top_k: int = 20,
+    final_top_k: int = 10,
+    rrf_k: int = 60,
+    reranker_timeout_seconds: float = 15.0,
+) -> CaseEvaluationResult:
+    """Run the real TrustedAgentCore QA pipeline against a frozen QA dataset.
+
+    The pipeline is the production guard→route→retrieve→grade→generate→verify
+    chain. Refusals are read from the INSUFFICIENT_EVIDENCE status, and citation
+    judgments are derived deterministically from frozen claim labels.
+    """
+
+    if index_version < 1:
+        raise ValueError("index_version must be positive")
+    generated = (generated_at or datetime.now(UTC)).astimezone(UTC)
+    commit, dirty = _resolve_git_provenance(git_commit, git_dirty)
+    hardware_details = dict(hardware or _hardware_provenance())
+
+    async with session_factory() as session:
+        dataset, course_index, cases, teacher = await _case_evaluation_context(
+            session,
+            dataset_id=dataset_id,
+            index_version=index_version,
+            expected_type=EvalDatasetType.END_TO_END_QA,
+            require_retrieval_components=True,
+        )
+        if course_index.status != CourseIndexStatus.ACTIVE:
+            raise EvaluationRunnerError(
+                "EVAL_QA_INDEX_NOT_ACTIVE",
+                "End-to-end QA measures the student-facing pipeline and requires an ACTIVE index",
+            )
+        for case in cases:
+            _case_query(case)
+            if not _qa_labeled_claims(case):
+                raise _case_error(
+                    case,
+                    "EVAL_QA_CLAIMS_MISSING",
+                    "QA cases must label claims under labels.claims or expected.claims",
+                )
+            if not isinstance(case.expected.get("is_answerable"), bool):
+                raise _case_error(
+                    case,
+                    "EVAL_QA_ANSWERABILITY_MISSING",
+                    "QA cases must label expected.is_answerable as a boolean",
+                )
+
+        factory = provider_factory or DefaultEvaluationProviderFactory()
+        engine = session.get_bind()
+        providers = factory.build(
+            session_factory=session_factory,
+            settings=settings,
+            dialect_name=engine.dialect.name,
+            course_index=course_index,
+        )
+        if not providers.model_versions:
+            raise EvaluationRunnerError(
+                "EVAL_MODEL_PROVENANCE_MISSING",
+                "The provider factory must report model versions",
+            )
+        chat_adapter = (
+            chat_adapter_factory()
+            if chat_adapter_factory is not None
+            else build_openai_chat_adapter(settings)
+        )
+        chat_model = getattr(chat_adapter, "model", None) or NO_GENERATION_QA_VERSION
+        retrieval_config = HybridRetrievalConfig(
+            route_top_k=route_top_k,
+            fusion_top_k=fusion_top_k,
+            final_top_k=final_top_k,
+            rrf_k=rrf_k,
+            reranker_timeout_seconds=reranker_timeout_seconds,
+        )
+        hybrid = HybridRetriever(
+            dense=providers.dense,
+            lexical=providers.lexical,
+            reranker=providers.reranker,
+            config=retrieval_config,
+        )
+        runner_parameters = {
+            "route_top_k": route_top_k,
+            "fusion_top_k": fusion_top_k,
+            "final_top_k": final_top_k,
+            "rrf_k": rrf_k,
+            "reranker_timeout_seconds": reranker_timeout_seconds,
+            "router_model": DETERMINISTIC_ROUTER_VERSION,
+            "grounding": LEXICAL_GROUNDING_VERSION,
+        }
+        model_versions = {
+            **dict(providers.model_versions),
+            "router": DETERMINISTIC_ROUTER_VERSION,
+            "chat": str(chat_model),
+            "grounding": LEXICAL_GROUNDING_VERSION,
+        }
+
+        case_results: dict[str, Any] = {}
+        started = time.perf_counter()
+        for case in cases:
+            query = _case_query(case)
+            labeled_claims = _qa_labeled_claims(case)
+            scope_raw = case.expected.get("relevant_chunk_ids")
+            scope = (
+                _canonical_chunk_id_set(case, scope_raw, "expected.relevant_chunk_ids")
+                if scope_raw is not None
+                else frozenset(
+                    chunk_id
+                    for labeled in labeled_claims.values()
+                    for chunk_id in (labeled.supporting_chunk_ids or ())
+                )
+            )
+            if not scope:
+                raise _case_error(
+                    case,
+                    "EVAL_QA_EVIDENCE_SCOPE_MISSING",
+                    "QA cases must label evidence scope via expected.relevant_chunk_ids "
+                    "or claim supporting_chunk_ids",
+                )
+            raw_student_id = case.input.get("student_id")
+            student_id: str | None = None
+            if raw_student_id is not None:
+                student_id = str(
+                    _required_uuid(
+                        case, raw_student_id, "EVAL_QA_STUDENT_INVALID", "student_id"
+                    )
+                )
+            try:
+                request = AgentRequest(
+                    course_id=str(dataset.course_id),
+                    query=query,
+                    student_id=student_id,
+                    active_index_version=str(index_version),
+                )
+            except ValidationError as exc:
+                raise _case_error(
+                    case,
+                    "EVAL_CASE_INPUT_INVALID",
+                    "The QA case input cannot build an AgentRequest",
+                ) from exc
+
+            trace_id = uuid.uuid4()
+            evidence_retriever = CourseMaterialEvidenceRetriever(
+                session,
+                backend=hybrid,
+                course_id=dataset.course_id,
+                index_version=index_version,
+                trace_id=trace_id,
+            )
+            core = TrustedAgentCore(
+                retriever=evidence_retriever,
+                chat_adapter=chat_adapter,
+                router=ValidatedIntentRouter(),
+            )
+            response = await core.run(request)
+            if response.status == AgentStatus.RETRIEVAL_UNAVAILABLE:
+                raise _case_error(
+                    case,
+                    "EVAL_QA_RETRIEVAL_UNAVAILABLE",
+                    "The QA pipeline could not retrieve course evidence",
+                )
+            if response.status == AgentStatus.BUDGET_EXCEEDED:
+                raise _case_error(
+                    case,
+                    "EVAL_QA_BUDGET_EXCEEDED",
+                    "The QA pipeline exceeded its safety budget",
+                )
+            refused = response.status == AgentStatus.INSUFFICIENT_EVIDENCE
+            case_results[case.case_key] = {
+                "refused": refused,
+                "agent_status": response.status.value,
+                "routed_intent": response.route.intent.value,
+                "citations": _qa_judgments(
+                    response, labeled_claims=labeled_claims, scope=scope
+                ),
+                "answer": response.answer,
+                "warnings": list(response.warnings),
+                "retrieval_trace_count": len(evidence_retriever.traces),
+            }
+        duration_ms = (time.perf_counter() - started) * 1000
+
+        snapshot = _domain_snapshot(
+            dataset, cases, frozen_at=_require_frozen_at(dataset)
+        )
+        selected_report_version = report_version or _report_version(
+            dataset, index_version, generated
+        )
+        run = await _persist_case_run(
+            session,
+            dataset=dataset,
+            teacher=teacher,
+            index_version=index_version,
+            model_versions=model_versions,
+            prompt_version=prompt_version,
+            runner_parameters=runner_parameters,
+            hardware_details=hardware_details,
+            git_commit=commit,
+            git_dirty=dirty,
+            selected_report_version=selected_report_version,
+            duration_ms=duration_ms,
+            case_results=case_results,
+        )
+        report = _case_report_payload(
+            dataset=dataset,
+            course_index=course_index,
+            snapshot=snapshot,
+            selected_report_version=selected_report_version,
+            generated=generated,
+            git_commit=commit,
+            git_dirty=dirty,
+            model_versions=model_versions,
+            prompt_version=prompt_version,
+            runner_parameters=runner_parameters,
+            hardware_details=hardware_details,
+            run=run,
+            case_results=case_results,
+        )
+        report_path = _write_report(output_dir, selected_report_version, report)
+        return CaseEvaluationResult(report_path, report, run.id)
+
+
+async def run_case_evaluation(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    dataset_id: uuid.UUID,
+    dataset_type: EvalDatasetType,
+    index_version: int,
+    output_dir: str | Path,
+    provider_factory: EvaluationProviderFactory | None = None,
+    chat_adapter_factory: Callable[[], Any] | None = None,
+    git_commit: str | None = None,
+    git_dirty: bool | None = None,
+    report_version: str | None = None,
+    prompt_version: str | None = None,
+    generated_at: datetime | None = None,
+    hardware: Mapping[str, Any] | None = None,
+    route_top_k: int = 20,
+    fusion_top_k: int = 20,
+    final_top_k: int = 10,
+    rrf_k: int = 60,
+    reranker_timeout_seconds: float = 15.0,
+) -> CaseEvaluationResult:
+    """Dispatch the server-side case runner for every non-retrieval dataset type."""
+
+    if dataset_type == EvalDatasetType.INTENT_ROUTING:
+        return await run_intent_routing_evaluation(
+            session_factory=session_factory,
+            settings=settings,
+            dataset_id=dataset_id,
+            index_version=index_version,
+            output_dir=output_dir,
+            git_commit=git_commit,
+            git_dirty=git_dirty,
+            report_version=report_version,
+            prompt_version=prompt_version or "no-generation/intent-routing-eval-v1",
+            generated_at=generated_at,
+            hardware=hardware,
+        )
+    if dataset_type == EvalDatasetType.LEARNING_PATH:
+        return await run_learning_path_evaluation(
+            session_factory=session_factory,
+            settings=settings,
+            dataset_id=dataset_id,
+            index_version=index_version,
+            output_dir=output_dir,
+            git_commit=git_commit,
+            git_dirty=git_dirty,
+            report_version=report_version,
+            prompt_version=prompt_version or "no-generation/learning-path-eval-v1",
+            generated_at=generated_at,
+            hardware=hardware,
+        )
+    if dataset_type == EvalDatasetType.END_TO_END_QA:
+        return await run_end_to_end_qa_evaluation(
+            session_factory=session_factory,
+            settings=settings,
+            dataset_id=dataset_id,
+            index_version=index_version,
+            output_dir=output_dir,
+            provider_factory=provider_factory,
+            chat_adapter_factory=chat_adapter_factory,
+            git_commit=git_commit,
+            git_dirty=git_dirty,
+            report_version=report_version,
+            prompt_version=prompt_version
+            or "coursepilot-trusted-core/grounded-render-v1",
+            generated_at=generated_at,
+            hardware=hardware,
+            route_top_k=route_top_k,
+            fusion_top_k=fusion_top_k,
+            final_top_k=final_top_k,
+            rrf_k=rrf_k,
+            reranker_timeout_seconds=reranker_timeout_seconds,
+        )
+    raise EvaluationRunnerError(
+        "EVAL_DATASET_TYPE_INVALID",
+        "RETRIEVAL datasets must use run_three_baselines",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1073,7 +2180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = asyncio.run(_async_main(args))
     except EvaluationRunnerError as exc:
-        payload = {"error": {"code": exc.code, "message": str(exc)}}
+        payload: dict[str, Any] = {"error": {"code": exc.code, "message": str(exc)}}
         if exc.details:
             payload["error"]["details"] = exc.details
         print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)

@@ -1205,30 +1205,41 @@ async def queue_run(
             "EVAL_DATASET_NOT_FROZEN",
             "Evaluation runs require a frozen dataset",
         )
-    if dataset.type != EvalDatasetType.RETRIEVAL:
-        raise AppError(
-            409,
-            "EVAL_DATASET_TYPE_INVALID",
-            "The server runner currently accepts RETRIEVAL datasets only",
-        )
     index_version = int(launch_config["index_version"])
+    if dataset.type == EvalDatasetType.END_TO_END_QA:
+        # QA runs measure the student-facing pipeline, which only serves the
+        # ACTIVE published index version.
+        acceptable_statuses = {CourseIndexStatus.ACTIVE}
+    else:
+        acceptable_statuses = {CourseIndexStatus.READY, CourseIndexStatus.ACTIVE}
     course_index = await session.scalar(
         select(CourseIndex).where(
             CourseIndex.course_id == dataset.course_id,
             CourseIndex.version == index_version,
-            CourseIndex.status.in_({CourseIndexStatus.READY, CourseIndexStatus.ACTIVE}),
+            CourseIndex.status.in_(acceptable_statuses),
             CourseIndex.deleted_at.is_(None),
         )
     )
     if course_index is None:
+        if dataset.type == EvalDatasetType.END_TO_END_QA:
+            raise AppError(
+                409,
+                "EVAL_QA_INDEX_NOT_ACTIVE",
+                "End-to-end QA runs require the ACTIVE course index version",
+            )
         raise AppError(
             409,
             "EVAL_INDEX_NOT_READY",
             "The configured course index version is missing or not ready",
         )
+    execution = (
+        "SERVER_THREE_BASELINE_RUNNER"
+        if dataset.type == EvalDatasetType.RETRIEVAL
+        else "SERVER_CASE_RUNNER"
+    )
     config = {
         "schema_version": RUN_CONFIG_SCHEMA_VERSION,
-        "execution": "SERVER_THREE_BASELINE_RUNNER",
+        "execution": execution,
         "dataset": {"id": str(dataset.id), "version": dataset.version},
         "course_index": {"id": str(course_index.id), "version": index_version},
         "launch": dict(launch_config),
