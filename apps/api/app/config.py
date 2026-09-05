@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     model_allow_download: bool = False
     upload_root: Path = Path("/data/uploads")
     index_root: Path = Path("/data/indexes")
+    evaluation_report_root: Path = Path("evaluation-reports")
     hf_home: Path = Path("/data/models/huggingface")
     max_upload_bytes: int = Field(default=50 * 1024 * 1024, ge=1, le=50 * 1024 * 1024)
     readiness_timeout_seconds: float = Field(default=3.0, gt=0, le=30)

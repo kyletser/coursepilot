@@ -1785,9 +1785,18 @@ def _qa_judgments(
             if index < len(response.claims)
         ]
         for claim_id, labeled in labeled_claims.items():
-            attributed = any(
-                lexical_claim_support(labeled.text, generated_text)
-                for generated_text in generated_texts
+            # Frozen supporting-chunk labels are the deterministic gold mapping.
+            # A model may faithfully paraphrase the labeled claim with little
+            # character overlap; requiring label-to-generation lexical overlap
+            # undercounts valid citations even after runtime grounding has already
+            # verified every generated claim against this exact evidence chunk.
+            attributed = (
+                citation.chunk_id in labeled.supporting_chunk_ids
+                if labeled.supporting_chunk_ids is not None
+                else any(
+                    lexical_claim_support(labeled.text, generated_text)
+                    for generated_text in generated_texts
+                )
             )
             if not attributed:
                 continue

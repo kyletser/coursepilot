@@ -42,6 +42,7 @@ x-api-environment: &api-environment
   MODEL_ALLOW_DOWNLOAD: ${MODEL_ALLOW_DOWNLOAD:-false}
   UPLOAD_ROOT: ${UPLOAD_ROOT:-/data/uploads}
   INDEX_ROOT: ${INDEX_ROOT:-/data/indexes}
+  EVALUATION_REPORT_ROOT: ${EVALUATION_REPORT_ROOT:-/data/evaluation-reports}
   HF_HOME: ${HF_HOME:-/data/models/huggingface}
   MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-52428800}
 
@@ -180,6 +181,7 @@ services:
     volumes:
       - uploads_data:/data/uploads
       - indexes_data:/data/indexes
+      - evaluation_reports_data:/data/evaluation-reports
       - model_cache:/data/models
     depends_on:
       migrate:
@@ -222,6 +224,7 @@ services:
     volumes:
       - uploads_data:/data/uploads
       - indexes_data:/data/indexes
+      - evaluation_reports_data:/data/evaluation-reports
       - model_cache:/data/models
     depends_on:
       migrate:
@@ -291,4 +294,5 @@ volumes:
   neo4j_logs:
   uploads_data:
   indexes_data:
+  evaluation_reports_data:
   model_cache:

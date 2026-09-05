@@ -100,7 +100,8 @@ async def _seed_queued_run(app_instance, *, case_input: dict):
         return run.id
 
 
-async def test_celery_task_executes_queued_eval_run(app_instance):
+async def test_celery_task_executes_queued_eval_run(app_instance, tmp_path):
+    app_instance.state.settings.evaluation_report_root = tmp_path / "eval-reports"
     run_id = await _seed_queued_run(
         app_instance, case_input={"query": "帮我诊断知识缺口"}
     )

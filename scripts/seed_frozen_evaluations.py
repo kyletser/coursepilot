@@ -17,7 +17,7 @@ from typing import Any
 
 from seed_demo import ApiClient, SeedError, ensure_account
 
-DATASET_VERSION = 1
+DATASET_VERSION = 2
 STUDENT_EMAIL = "demo-student@example.com"
 STUDENT_PASSWORD = "CoursePilot-demo-student-2026!"
 
@@ -475,13 +475,52 @@ def _prerequisite_edges(graph: dict[str, Any]) -> list[list[str]]:
     if not isinstance(relations, list):
         raise SeedError("图谱候选响应缺少 relations。")
     return [
-        [str(item["from_candidate_id"]), str(item["to_candidate_id"])]
+        [str(item["from_concept_id"]), str(item["to_concept_id"])]
         for item in relations
         if isinstance(item, dict)
         and item.get("type") == "PREREQUISITE_OF"
-        and item.get("from_candidate_id")
-        and item.get("to_candidate_id")
+        and item.get("from_concept_id")
+        and item.get("to_concept_id")
     ]
+
+
+def _ensure_mastery_states(
+    student: ApiClient,
+    course_id: str,
+    concepts: dict[str, dict[str, Any]],
+) -> None:
+    """Create auditable mastery only through approved quiz attempts.
+
+    KG-personalized evaluation intentionally refuses to fabricate a default
+    mastery value, so each frozen target must be backed by a real graded attempt.
+    Deterministic idempotency keys make this safe to rerun.
+    """
+
+    current = student.call("GET", f"/api/v1/courses/{course_id}/mastery")
+    existing = {
+        str(item.get("concept_id"))
+        for item in current
+        if isinstance(item, dict) and item.get("concept_id")
+    }
+    for concept in concepts.values():
+        concept_id = str(concept["id"])
+        if concept_id in existing:
+            continue
+        quiz = student.call(
+            "GET",
+            f"/api/v1/courses/{course_id}/quizzes/next?concept_id={concept_id}",
+        )
+        options = quiz.get("options") if isinstance(quiz, dict) else None
+        if not isinstance(options, list) or not options:
+            raise SeedError(f"知识点 {concept_id} 没有可作答的审核题目。")
+        student.call(
+            "POST",
+            f"/api/v1/quizzes/{quiz['id']}/attempts",
+            json_body={
+                "answer": str(options[0]),
+                "idempotency_key": f"internal-eval-v{DATASET_VERSION}-{course_id}-{concept_id}",
+            },
+        )
 
 
 def _teacher_path(
@@ -730,6 +769,7 @@ def run(args: argparse.Namespace) -> None:
         )
         concepts = _name_map(graph)
         edges = _prerequisite_edges(graph)
+        _ensure_mastery_states(student, course_id, concepts)
         generated = _cases(spec, concepts, edges, student_id)
         course_manifest: dict[str, Any] = {}
         for dataset_type, cases in generated.items():

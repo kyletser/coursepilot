@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -53,7 +52,7 @@ async def execute_eval_run(
                 settings=settings,
                 dataset_id=dataset_id,
                 index_version=int(launch["index_version"]),
-                output_dir=Path("evaluation-reports"),
+                output_dir=settings.evaluation_report_root,
                 report_version=launch.get("report_version"),
                 prompt_version=prompt_version or "no-generation/retrieval-eval-v1",
                 route_top_k=int(launch["route_top_k"]),
@@ -80,7 +79,7 @@ async def execute_eval_run(
                 dataset_id=dataset_id,
                 dataset_type=dataset_type,
                 index_version=int(launch["index_version"]),
-                output_dir=Path("evaluation-reports"),
+                output_dir=settings.evaluation_report_root,
                 report_version=launch.get("report_version"),
                 prompt_version=prompt_version,
                 route_top_k=int(launch["route_top_k"]),

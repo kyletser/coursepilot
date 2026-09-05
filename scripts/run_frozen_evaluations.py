@@ -83,7 +83,7 @@ async def run(args: argparse.Namespace) -> None:
                         CourseIndex.course_id == Course.id,
                     )
                     .where(
-                        EvalDataset.name.like("内部正式-%-v1"),
+                        EvalDataset.name.like("内部正式-%-v2"),
                         EvalDataset.status == EvalDatasetStatus.FROZEN,
                         CourseIndex.status == CourseIndexStatus.ACTIVE,
                         EvalDataset.deleted_at.is_(None),
@@ -107,7 +107,7 @@ async def run(args: argparse.Namespace) -> None:
         for dataset, course, course_index in selected:
             expected_count = EXPECTED_COUNTS[dataset.type]
             report_version = (
-                f"internal-v1-{course.code.lower()}-{dataset.type.value.lower()}"
+                f"internal-v2-{course.code.lower()}-{dataset.type.value.lower()}"
             )
             common = {
                 "session_factory": session_factory,

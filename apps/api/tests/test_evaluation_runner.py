@@ -995,6 +995,50 @@ async def test_qa_runner_requires_active_index(app_instance, tmp_path):
         assert await session.scalar(select(func.count(EvalRun.id))) == 0
 
 
+async def test_qa_runner_credits_grounded_paraphrase_using_frozen_chunk_label(
+    app_instance, tmp_path
+):
+    base = await _seed_case_base(app_instance)
+    dataset_id = await _add_frozen_dataset(
+        app_instance,
+        course_id=base["course_id"],
+        teacher_id=base["teacher_id"],
+        dataset_type=EvalDatasetType.END_TO_END_QA,
+        name="Frozen QA paraphrase fixture",
+        cases=[
+            {
+                "case_key": "paraphrase",
+                "input": {"query": "What lookup performance is supported?"},
+                "expected": {
+                    "is_answerable": True,
+                    "relevant_chunk_ids": [str(base["target_id"])],
+                    "required_claim_ids": ["claim-lookup"],
+                },
+                "labels": {
+                    "claims": {
+                        "claim-lookup": {
+                            "text": "The tree can find keys efficiently.",
+                            "supporting_chunk_ids": [str(base["target_id"])],
+                        }
+                    }
+                },
+            }
+        ],
+    )
+    result = await run_end_to_end_qa_evaluation(
+        session_factory=app_instance.state.session_factory,
+        settings=app_instance.state.settings,
+        dataset_id=dataset_id,
+        index_version=1,
+        output_dir=tmp_path,
+        provider_factory=FakeQAProviderFactory(base["noise_id"], base["target_id"]),
+        chat_adapter_factory=lambda: FakeChatAdapter(TARGET_QA_CONTENT),
+        **_PROVENANCE_KWARGS,
+    )
+    assert result.report["metrics"]["citations"]["citation_accuracy"] == 1.0
+    assert result.report["metrics"]["citations"]["citation_coverage"] == 1.0
+
+
 async def test_qa_runner_requires_labels_before_running(app_instance, tmp_path):
     base = await _seed_case_base(app_instance)
     missing_claims_id = await _add_frozen_dataset(
