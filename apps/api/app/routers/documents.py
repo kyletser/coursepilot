@@ -24,6 +24,8 @@ from app.ingestion.parsers import detect_document_format
 from app.models import (
     Chunk,
     Course,
+    CourseIndex,
+    CourseIndexStatus,
     CourseStatus,
     Document,
     DocumentStatus,
@@ -31,6 +33,7 @@ from app.models import (
     DocumentVersionStatus,
     Enrollment,
     EnrollmentStatus,
+    IndexComponentStatus,
     IngestionJob,
     IngestionStage,
     RecordStatus,
@@ -562,16 +565,75 @@ async def retry_ingestion_job(
     session: SessionDep,
     teacher: TeacherUser,
 ):
-    job, version, _document, _course = await _job_resources(
+    job, version, _document, course = await _job_resources(
         session, job_id, teacher, for_update=True
     )
-    if job.stage != IngestionStage.FAILED:
+    details = dict(job.stage_details or {})
+    course_index = None
+    raw_index_id = details.get("course_index_id")
+    if isinstance(raw_index_id, str):
+        try:
+            course_index = await session.get(CourseIndex, uuid.UUID(raw_index_id))
+        except ValueError:
+            course_index = None
+
+    degraded_ready = (
+        job.stage == IngestionStage.READY_FOR_REVIEW
+        and course_index is not None
+        and course_index.course_id == course.id
+        and course_index.status == CourseIndexStatus.READY
+        and (
+            course_index.dense_status != IndexComponentStatus.READY
+            or course_index.lexical_status != IndexComponentStatus.READY
+        )
+    )
+    if job.stage != IngestionStage.FAILED and not degraded_ready:
         raise AppError(
             409,
             "INGESTION_JOB_NOT_RETRYABLE",
-            "Only failed ingestion jobs can be retried",
-            details={"stage": job.stage.value},
+            "Only failed jobs or ready jobs with degraded index components can be retried",
+            details={
+                "stage": job.stage.value,
+                "dense_status": (
+                    course_index.dense_status.value
+                    if course_index is not None
+                    else None
+                ),
+                "lexical_status": (
+                    course_index.lexical_status.value
+                    if course_index is not None
+                    else None
+                ),
+            },
         )
+    requested_at = datetime.now(UTC).isoformat()
+    if degraded_ready:
+        assert course_index is not None  # narrowed by the degraded_ready predicate
+        # The original parse/chunk output is still authoritative. Rewind only to
+        # that checkpoint so recovered model/index dependencies can be rebuilt
+        # without creating a new document version or duplicating candidates.
+        raw_recovery_history = details.get("recovery_history")
+        recovery_history = (
+            list(raw_recovery_history)
+            if isinstance(raw_recovery_history, list)
+            else []
+        )
+        recovery_history.append(
+            {
+                "requested_at": requested_at,
+                "reason": "DEGRADED_INDEX_COMPONENTS",
+                "dense_status": course_index.dense_status.value,
+                "lexical_status": course_index.lexical_status.value,
+            }
+        )
+        details["last_safe_stage"] = IngestionStage.CHUNKING.value
+        details["recovery_history"] = recovery_history
+        details.pop("validation", None)
+        course_index.status = CourseIndexStatus.BUILDING
+        course_index.dense_status = IndexComponentStatus.PENDING
+        course_index.lexical_status = IndexComponentStatus.PENDING
+        course_index.validated_at = None
+        course_index.smoke_test_result = None
     job.stage = IngestionStage.QUEUED
     job.progress = 0
     job.error_code = None
@@ -579,10 +641,7 @@ async def retry_ingestion_job(
     job.retry_count += 1
     job.started_at = None
     job.finished_at = None
-    job.stage_details = {
-        **dict(job.stage_details or {}),
-        "retry_requested_at": datetime.now(UTC).isoformat(),
-    }
+    job.stage_details = {**details, "retry_requested_at": requested_at}
     version.status = DocumentVersionStatus.UPLOADED
     await session.commit()
     await _dispatch(request, job.id)

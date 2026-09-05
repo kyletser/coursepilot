@@ -289,7 +289,7 @@ class DefaultEvaluationProviderFactory:
         embedding = BGEM3EmbeddingAdapter(
             settings.embedding_model,
             allow_download=settings.model_allow_download,
-            cache_folder=settings.hf_home,
+            cache_folder=settings.hf_hub_cache,
         )
         if course_index.status == CourseIndexStatus.ACTIVE:
             dense: Any = PostgresPgVectorDenseRetriever(
@@ -334,7 +334,7 @@ class DefaultEvaluationProviderFactory:
         reranker = BGERerankerAdapter(
             settings.reranker_model,
             allow_download=settings.model_allow_download,
-            cache_folder=settings.hf_home,
+            cache_folder=settings.hf_hub_cache,
         )
         return EvaluationProviders(
             dense=dense,

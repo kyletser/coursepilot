@@ -58,6 +58,12 @@ class Settings(BaseSettings):
 
     sql_echo: bool = False
 
+    @property
+    def hf_hub_cache(self) -> Path:
+        """Canonical Hugging Face Hub cache below ``HF_HOME``."""
+
+        return self.hf_home / "hub"
+
     @model_validator(mode="after")
     def validate_production_secrets(self) -> Settings:
         if self.environment == "production":

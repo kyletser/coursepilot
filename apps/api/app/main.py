@@ -57,7 +57,7 @@ def create_app(
     embedding_adapter = BGEM3EmbeddingAdapter(
         app_settings.embedding_model,
         allow_download=app_settings.model_allow_download,
-        cache_folder=app_settings.hf_home,
+        cache_folder=app_settings.hf_hub_cache,
     )
     application.state.embedding_adapter = embedding_adapter
     application.state.dense_retriever = PostgresPgVectorDenseRetriever(
@@ -71,7 +71,7 @@ def create_app(
     application.state.reranker = BGERerankerAdapter(
         app_settings.reranker_model,
         allow_download=app_settings.model_allow_download,
-        cache_folder=app_settings.hf_home,
+        cache_folder=app_settings.hf_hub_cache,
     )
     application.state.chat_adapter = build_openai_chat_adapter(app_settings)
     application.state.required_db_revision = (

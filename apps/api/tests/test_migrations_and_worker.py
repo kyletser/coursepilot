@@ -85,6 +85,7 @@ def test_shared_embedding_adapter_is_a_process_level_singleton(monkeypatch):
     )
     adapter = ingestion_module.shared_embedding_adapter(settings)
     assert isinstance(adapter, BGEM3EmbeddingAdapter)
+    assert adapter.cache_folder == str(settings.hf_home / "hub")
     # Lazily loaded: constructing or reusing the singleton never loads weights.
     assert adapter.is_loaded is False
     assert ingestion_module.shared_embedding_adapter(settings) is adapter

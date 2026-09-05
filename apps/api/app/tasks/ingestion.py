@@ -36,7 +36,7 @@ def shared_embedding_adapter(settings: Settings) -> DocumentEmbeddingAdapter:
                 _embedding_adapter = BGEM3EmbeddingAdapter(
                     settings.embedding_model,
                     allow_download=settings.model_allow_download,
-                    cache_folder=settings.hf_home,
+                    cache_folder=settings.hf_hub_cache,
                 )
             adapter = _embedding_adapter
     return adapter

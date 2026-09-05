@@ -102,7 +102,7 @@ class IngestionPipeline:
         self.embedding_adapter = embedding_adapter or BGEM3EmbeddingAdapter(
             settings.embedding_model,
             allow_download=settings.model_allow_download,
-            cache_folder=settings.hf_home,
+            cache_folder=settings.hf_hub_cache,
         )
 
     async def run(self, job_id: uuid.UUID) -> dict[str, object]:

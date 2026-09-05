@@ -17,6 +17,7 @@ from app.models import (
     IngestionJob,
     IngestionStage,
 )
+from app.retrieval import ModelDependencyUnavailableError
 from app.routers import documents
 from tests.helpers import auth_headers, create_course, register_and_login
 
@@ -24,6 +25,11 @@ from tests.helpers import auth_headers, create_course, register_and_login
 class FakeEmbeddingAdapter:
     async def embed_documents(self, texts):
         return [[0.001] * 1024 for _text in texts]
+
+
+class UnavailableEmbeddingAdapter:
+    async def embed_documents(self, texts):
+        raise ModelDependencyUnavailableError("test dependency outage")
 
 
 def _enable_documents_api(app_instance, tmp_path) -> None:
@@ -147,6 +153,82 @@ async def test_txt_upload_sha_idempotency_and_pipeline(client, app_instance, tmp
     )
     assert versions.status_code == 200
     assert len(versions.json()["data"]) == 1
+
+
+async def test_degraded_ready_job_retries_same_version_and_index(
+    client, app_instance, tmp_path
+):
+    _enable_documents_api(app_instance, tmp_path)
+    _, teacher_tokens = await register_and_login(
+        client, "degraded-retry-owner@example.com", role="TEACHER"
+    )
+    course = await create_course(client, teacher_tokens)
+    uploaded = await _upload_txt(client, teacher_tokens, course["id"])
+    record = uploaded.json()["data"]
+    job_id = record["ingestion_job"]["id"]
+    version_id = record["latest_version"]["id"]
+
+    first_result = await run_ingestion_pipeline(
+        job_id,
+        session_factory=app_instance.state.session_factory,
+        settings=app_instance.state.settings,
+        embedding_adapter=UnavailableEmbeddingAdapter(),
+    )
+    assert first_result["stage"] == "READY_FOR_REVIEW"
+    original_index_id = first_result["course_index_id"]
+
+    async with app_instance.state.session_factory() as session:
+        course_index = await session.get(CourseIndex, uuid.UUID(original_index_id))
+        assert course_index is not None
+        assert course_index.dense_status == IndexComponentStatus.PENDING
+        assert course_index.lexical_status == IndexComponentStatus.READY
+
+    retried = await client.post(
+        f"/api/v1/ingestion-jobs/{job_id}/retry",
+        headers=auth_headers(teacher_tokens),
+    )
+    assert retried.status_code == 200, retried.text
+    retry_payload = retried.json()["data"]
+    assert retry_payload["stage"] == "QUEUED"
+    assert retry_payload["retry_count"] == 1
+
+    async with app_instance.state.session_factory() as session:
+        job = await session.get(IngestionJob, uuid.UUID(job_id))
+        course_index = await session.get(CourseIndex, uuid.UUID(original_index_id))
+        assert job is not None
+        assert course_index is not None
+        assert job.version_id == uuid.UUID(version_id)
+        assert job.stage_details["last_safe_stage"] == "CHUNKING"
+        assert job.stage_details["recovery_history"][-1]["reason"] == (
+            "DEGRADED_INDEX_COMPONENTS"
+        )
+        assert course_index.status == CourseIndexStatus.BUILDING
+
+    second_result = await run_ingestion_pipeline(
+        job_id,
+        session_factory=app_instance.state.session_factory,
+        settings=app_instance.state.settings,
+        embedding_adapter=FakeEmbeddingAdapter(),
+    )
+    assert second_result["stage"] == "READY_FOR_REVIEW"
+    assert second_result["course_index_id"] == original_index_id
+
+    async with app_instance.state.session_factory() as session:
+        indexes = (
+            await session.scalars(
+                select(CourseIndex).where(
+                    CourseIndex.course_id == uuid.UUID(course["id"])
+                )
+            )
+        ).all()
+        job = await session.get(IngestionJob, uuid.UUID(job_id))
+        version = await session.get(DocumentVersion, uuid.UUID(version_id))
+        assert len(indexes) == 1
+        assert indexes[0].dense_status == IndexComponentStatus.READY
+        assert indexes[0].lexical_status == IndexComponentStatus.READY
+        assert job is not None and job.stage == IngestionStage.READY_FOR_REVIEW
+        assert version is not None
+        assert version.status == DocumentVersionStatus.READY_FOR_REVIEW
 
 
 async def test_document_management_and_chunk_access_follow_course_permissions(

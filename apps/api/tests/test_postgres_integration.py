@@ -38,11 +38,21 @@ async def postgres_client(tmp_path) -> AsyncIterator[httpx.AsyncClient]:
     engine = create_async_engine(
         database_url,
         pool_pre_ping=True,
-        connect_args={"server_settings": {"search_path": schema}},
+        # Keep test tables isolated while retaining access to extensions such
+        # as pgvector, which migrations install in the public schema.
+        connect_args={"server_settings": {"search_path": f"{schema},public"}},
     )
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            # The public schema contains the live application's tables as well as
+            # the pgvector extension. With checkfirst=True, PostgreSQL can report
+            # the public tables as existing through search_path and SQLAlchemy then
+            # skips creating isolated copies in this fresh test schema.
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection, checkfirst=False
+                )
+            )
         settings = Settings(
             _env_file=None,  # type: ignore[call-arg]
             environment="test",
