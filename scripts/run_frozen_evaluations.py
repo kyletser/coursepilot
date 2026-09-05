@@ -8,7 +8,9 @@ import asyncio
 import json
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 
@@ -20,6 +22,8 @@ if str(API_ROOT) not in sys.path:
 from app.config import get_settings
 from app.db import create_engine, create_session_factory
 from app.evaluation.runner import (
+    CaseEvaluationResult,
+    ThreeBaselineResult,
     run_end_to_end_qa_evaluation,
     run_intent_routing_evaluation,
     run_learning_path_evaluation,
@@ -46,12 +50,20 @@ TYPE_ORDER = {
     EvalDatasetType.RETRIEVAL: 2,
     EvalDatasetType.END_TO_END_QA: 3,
 }
-OPTIMIZED_RETRIEVAL = {
+OPTIMIZED_RETRIEVAL: dict[str, Any] = {
     "route_top_k": 10,
     "fusion_top_k": 8,
     "final_top_k": 5,
     "reranker_timeout_seconds": 15.0,
 }
+
+
+def _summary_metrics(
+    report: Mapping[str, Any], dataset_type: EvalDatasetType
+) -> object:
+    if dataset_type != EvalDatasetType.RETRIEVAL:
+        return report["metrics"]
+    return {baseline["mode"]: baseline["metrics"] for baseline in report["baselines"]}
 
 
 def _require_clean_worktree() -> str:
@@ -122,7 +134,7 @@ async def run(args: argparse.Namespace) -> None:
             report_version = (
                 f"internal-v3-{course.code.lower()}-{dataset.type.value.lower()}"
             )
-            common = {
+            common: dict[str, Any] = {
                 "session_factory": session_factory,
                 "settings": settings,
                 "dataset_id": dataset.id,
@@ -135,6 +147,7 @@ async def run(args: argparse.Namespace) -> None:
             print(
                 f"Running {course.code} {dataset.type.value} ({expected_count} cases)..."
             )
+            result: ThreeBaselineResult | CaseEvaluationResult
             if dataset.type == EvalDatasetType.RETRIEVAL:
                 result = await run_three_baselines(**common, **OPTIMIZED_RETRIEVAL)
             elif dataset.type == EvalDatasetType.END_TO_END_QA:
@@ -158,7 +171,7 @@ async def run(args: argparse.Namespace) -> None:
                     "course": course.code,
                     "dataset_type": dataset.type.value,
                     "report_path": str(result.report_path),
-                    "metrics": report["metrics"],
+                    "metrics": _summary_metrics(report, dataset.type),
                 }
             )
             print(json.dumps(results[-1], ensure_ascii=False, sort_keys=True))
