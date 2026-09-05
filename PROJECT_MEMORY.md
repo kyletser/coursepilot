@@ -129,7 +129,7 @@ CoursePilot 的产品定位最终确定为：
 
 ## 9. 当前状态
 
-截至 2026-09-01：
+截至 2026-09-05：
 
 - 已完成产品与技术规格，并将实施节奏调整为连续推进。
 - 已初始化 Git、Next.js Web、FastAPI API、Celery Worker、Docker Compose 与 CI。
@@ -139,7 +139,10 @@ CoursePilot 的产品定位最终确定为：
 - 已提供两门原创 CC-BY-4.0 开放样例、一键真实入库脚本和三组检索基线运行器；脚本遇到模型或基础设施缺失时明确失败。种子脚本额外创建演示规模、人工标注的 DRAFT 评测数据集（检索用例绑定真实 chunk ID），不冻结、不产出任何指标。
 - 2026-08-31 修复审查确认的高优先缺陷：`CourseIndex` 记录语料覆盖集（迁移 0003）并贯通检索、发布与旧会话服务（版本隔离）；证据分数门槛改为真实校准（BM25 覆盖分、dense 相似度锚定、rerank sigmoid），移除按排名伪造的兜底分；Worker 进程级复用 BGE-M3；前端测验幂等键随题生成、网络瞬断不再清除登录态；Markdown 前置元数据入库即剥离；文档与决策记录同步（LangGraph/bm25s/确定性抽取）。
 - 2026-09-01 完成代码与功能审查报告中全部高/中/低优先项修复：评测 Runner 扩展至意图路由、学习路径与端到端问答；图谱候选批量审核端点；LLM 调用指数退避重试；前端 CSRF/Secure Cookie/CSP/超时/断流恢复加固；Dockerfile 多阶段与非 root 运行、`.dockerignore`、compose 弱凭据说明；CI 引入 ruff check、ruff format 校验与 mypy。本地回归 146 项后端测试通过（另 1 项未配置 PostgreSQL 测试库而跳过），ruff 与 mypy 全绿。
-- 尚未把任何演示指标写入项目结论；下一步在 Docker daemon 可用的干净环境中完成真实样例入库、冻结评测和质量门槛验收。
+- 已在本机 PostgreSQL/pgvector、Redis、Neo4j 和 Ollama 环境完成真实入库与正式冻结评测：内部 200 条 Retrieval、80 条 End-to-End QA、50 条 Intent Routing、30 条 Learning Path；外部使用 CMRC 2018 固定 50 问题/200 passage 子集做检索迁移测试。原始报告均绑定干净 Git 提交并归档在 `evaluation-reports/2026-09-05/`。
+- 内部宏平均结果：Hybrid + Reranker 相对 Dense-only 的 Recall@5 从 0.945 提升到 1.0，MRR@5 从 0.884 提升到 0.986；不可回答拒答率与引用准确率均为 1.0，引用覆盖率 0.9，误拒答率 0.075；路由、路径合法性和教师一致率均为 1.0。所有结论必须连同样本量和限制表述。
+- 在相同 40 条 DS QA 上把候选参数从 20/20/10 裁剪到 10/8/5，总耗时由 567.3s 降到 402.7s（-29.0%），质量指标不变；KG 评测复用 Hybrid 基础结果，只单独测个性化增量。
+- CMRC 外部子集上 Dense 已达到 Recall@5/MRR@5=1.0，CPU Reranker 没有准确率增益且显著更慢；该结果只作为跨域检索 sanity check 和“选择性重排”依据，不称为 CMRC 官方成绩。
 
 ## 10. 决策记录维护规则
 
@@ -169,3 +172,6 @@ CoursePilot 的产品定位最终确定为：
 | 2026-09-01 | 评测运行改由 Celery 异步调度（`coursepilot.evaluation.run`），Router 通过可注入的 `evaluation_run_dispatcher` 排队 | 长耗时评测阻塞 API 请求会带来超时与资源占用问题 | 运行状态入库可查询；测试可注入同步/记录型 dispatcher，保持行为可验证 |
 | 2026-09-01 | 前端安全加固：CSRF 失败关闭（Origin→Sec-Fetch-Site→Referer）、反代下按 `x-forwarded-proto` 置 `Secure`、CSP 头、30s 请求超时、SSE 连接超时与 `CHAT_STREAM_INTERRUPTED` 后按历史恢复 | 防跨站请求伪造、避免非 HTTPS 泄漏 Cookie、限制长时间挂起并保证断流可恢复 | BFF 统一处理；API 侧 Bearer 契约不变 |
 | 2026-09-01 | 引入 mypy 静态类型检查（`app` 与 `tests`），并在 CI 中加入 `ruff check`、`ruff format --check`、`mypy` | 提前捕获类型与契约不一致问题，补齐质量门槛 | `pyproject.toml` 新增 `[tool.mypy]` 与 test 依赖；CI backend 作业更名为 lint+typecheck+tests+migration |
+| 2026-09-05 | 正式评测固定使用本地 Ollama `qwen3:4b`，不调用外部模型 API | 保证隐私、零按次费用和可复现；4B 模型只用于作品集验证，不外推生产效果 | 报告记录模型、硬件与 `external_model_api_used=false`；服务端仍执行 Claim/Citation/Grounding 约束 |
+| 2026-09-05 | 内部正式检索参数采用 10/8/5，并在 KG 基线中复用同一 Hybrid 基础结果 | 相同 DS 40 条 QA 总耗时下降 29.0% 且质量不变；避免评测重复计算 | 报告同时记录等效耗时、实际执行耗时和复用标记，不将复用伪装成在线性能 |
+| 2026-09-05 | 外部测试使用 CMRC 2018 固定检索子集，明确不作为官方榜单成绩 | 检查内部优化是否只适用于自建课程，同时遵守 CC BY-SA 4.0 和结果边界 | 固定上游提交、源文件 SHA256、选择算法、50 问题/200 passage；不在仓库重新分发源数据 |

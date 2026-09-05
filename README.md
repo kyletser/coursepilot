@@ -2,7 +2,7 @@
 
 CoursePilot 是一个面向高校计算机课程的知识图谱增强个性化学习 Agent。首版聚焦数据结构与操作系统，并把教师提供的课程资料作为唯一权威知识来源。未经教师审核的知识关系和题目不能进入学生正式问答、掌握度或学习路径；证据不足时系统必须明确拒答。
 
-当前仓库已实现 MVP 核心工程闭环：教师可创建课程、上传并解析资料、审核候选知识图谱与题目、发布课程版本并查看学习数据；学生可加入课程、进行带引用问答、完成诊断测验并查看掌握度、知识图谱、学习路径与历史。Next.js Web、FastAPI API、Celery Worker、PostgreSQL/pgvector、Redis、Neo4j、数据库迁移、冻结评测和 CI 被组织为一个可复现的本地开发栈。规格中的质量门槛仍需由真实语料上的冻结评测报告验收，本仓库不预填任何实验结果，也不把工程测试通过等同于模型效果达标。
+当前仓库已实现 MVP 核心工程闭环：教师可创建课程、上传并解析资料、审核候选知识图谱与题目、发布课程版本并查看学习数据；学生可加入课程、进行带引用问答、完成诊断测验并查看掌握度、知识图谱、学习路径与历史。Next.js Web、FastAPI API、Celery Worker、PostgreSQL/pgvector、Redis、Neo4j、数据库迁移、冻结评测和 CI 被组织为一个可复现的本地开发栈。2026-09-05 已使用本地 `qwen3:4b`、BGE-M3 和 BGE Reranker 完成两门课程的正式冻结评测与 CMRC 外部检索迁移测试；结果、限制和原始 Trace 见[评测报告](docs/evaluation/agent-evaluation-2026-09-05.md)。
 
 ## 本地启动
 
@@ -67,6 +67,8 @@ uv run python -m app.evaluation.runner --dataset-id <dataset-uuid> --index-versi
 ```
 
 运行器会真实执行 `dense_only`、`hybrid_rerank` 和 `kg_personalized`，分别持久化 EvalRun，并向 `evaluation-reports/` 写入不可覆盖的版本化 JSON。报告固化 Git、数据集、索引、模型、Prompt、检索参数和硬件信息。缺少真实上下文时运行器会失败；测试中的 Fake provider 不会产生项目指标。
+
+仓库当前正式结果覆盖 200 条 Retrieval、80 条 End-to-End QA、50 条 Intent Routing 和 30 条 Learning Path；机器可读汇总与压缩原始报告位于 [`evaluation-reports/2026-09-05`](evaluation-reports/2026-09-05/README.md)。简历或对外介绍必须同时保留报告中的样本量、硬件、外部测试边界和已知限制。
 
 浏览器认证由 Next.js 同源 BFF 托管，Access/Refresh Token 只放在 `HttpOnly` Cookie 中；前端 JavaScript 和 `localStorage` 均无法读取令牌。
 

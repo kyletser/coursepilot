@@ -1,0 +1,100 @@
+{
+  "schema_version": "coursepilot.evaluation-summary/1.0.0",
+  "generated_on": "2026-09-05",
+  "models": {
+    "chat": "qwen3:4b via local Ollama",
+    "embedding": "BAAI/bge-m3 (local cache, CPU)",
+    "reranker": "BAAI/bge-reranker-v2-m3 (local cache, CPU)",
+    "external_model_api_used": false
+  },
+  "internal": {
+    "git_commit": "85f67a403ec2f3f2d45baabf4abf8fc99d451e4a",
+    "git_dirty": false,
+    "case_counts": {
+      "retrieval": 200,
+      "end_to_end_qa": 80,
+      "intent_routing": 50,
+      "learning_path": 30
+    },
+    "aggregate_metrics": {
+      "dense_only": {
+        "recall_at_5": 0.945,
+        "mrr_at_5": 0.88375,
+        "ndcg_at_10": 0.8993159335853883,
+        "mean_latency_ms_per_query": 560.238535
+      },
+      "hybrid_rerank": {
+        "recall_at_5": 1.0,
+        "mrr_at_5": 0.9858333333333333,
+        "ndcg_at_10": 0.9894639463035718,
+        "mean_latency_ms_per_query": 2006.15143
+      },
+      "kg_personalized": {
+        "recall_at_5": 1.0,
+        "mrr_at_5": 0.9883333333333333,
+        "ndcg_at_10": 0.9913092975357145,
+        "mean_incremental_personalization_ms_per_query": 3.03835,
+        "base_hybrid_retrieval_reused_during_evaluation": true
+      },
+      "qa": {
+        "unanswerable_refusal_rate": 1.0,
+        "false_refusal_rate": 0.075,
+        "citation_accuracy": 1.0,
+        "citation_coverage": 0.9,
+        "mean_end_to_end_ms_per_query": 11604.81715
+      },
+      "routing_macro_f1": 1.0,
+      "path_prerequisite_legality_rate": 1.0,
+      "teacher_path_consistency_rate": 1.0
+    },
+    "optimization_comparison": {
+      "scope": "same 40 DS QA cases; database EXCEPT comparison returned v2_only=0 and v3_only=0",
+      "before_git_commit": "0e54edd3b03e869343143d5bb8e7da76e276bdf9",
+      "before_parameters": "route_top_k=20, fusion_top_k=20, final_top_k=10",
+      "before_duration_ms": 567277.826,
+      "after_parameters": "route_top_k=10, fusion_top_k=8, final_top_k=5",
+      "after_duration_ms": 402669.469,
+      "duration_reduction_ratio": 0.2901723802,
+      "quality_metrics_changed": false
+    }
+  },
+  "external": {
+    "scope": "CMRC 2018 external-domain retrieval transfer check; not an official CMRC leaderboard result",
+    "git_commit": "60ba63109b4417111b4c73d0804b9eda24e7f286",
+    "git_dirty": false,
+    "source_repository": "https://github.com/ymcui/cmrc2018",
+    "source_commit": "c0eb1b6ba219847457e6af3180da722bbeb656af",
+    "source_file_sha256": "a976d1fd5efc173bd58ff1c57e958de5f49fed633a7bfb8e0e402e5490d75f5e",
+    "license": "CC-BY-SA-4.0",
+    "sample_count": 50,
+    "candidate_passage_count": 200,
+    "dense_only": {
+      "recall_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "mean_latency_ms_per_query": 122.316
+    },
+    "hybrid_rerank": {
+      "recall_at_5": 1.0,
+      "mrr_at_5": 1.0,
+      "mean_latency_ms_per_query": 9029.248
+    },
+    "interpretation": "The fixed subset is easy for BGE-M3. Reranking added no accuracy and was much slower on CPU."
+  },
+  "raw_report_archives": {
+    "internal-v3-raw.zip": {
+      "sha256": "30b5c48d343a53c1b23d57b6578799e2a2e3a460cd4ec036064e55b49dc1f826",
+      "uncompressed_report_commit": "85f67a403ec2f3f2d45baabf4abf8fc99d451e4a"
+    },
+    "cmrc-external-raw.zip": {
+      "sha256": "394ffb9a82e05ccf80d924c18b932afa4aa8e198bd88fe0fcac229b2dd5895ba",
+      "uncompressed_report_commit": "60ba63109b4417111b4c73d0804b9eda24e7f286"
+    }
+  },
+  "known_limitations": [
+    "Internal data comes from two demo courses rather than production traffic.",
+    "QA reports record total duration, not per-case P95 or TTFT.",
+    "Three of forty answerable internal QA cases were conservatively refused because their top reranker scores were below 0.55.",
+    "The external CMRC result evaluates retrieval transfer only; it is not an official full-dataset QA score.",
+    "BGE inference used CPU and the local qwen3:4b model is a demonstration model, not a production quality claim."
+  ]
+}
