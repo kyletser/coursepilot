@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import random
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
-from run_experiment import normalized, sha256, source_state, write_json
+from run_experiment import normalized, rows_for, sha256, source_state, write_json
 
 # run_experiment establishes the API import path for standalone script use.
 # isort: split
@@ -44,6 +46,48 @@ class RecordingTransport(httpx.AsyncBaseTransport):
                 content=content,
                 request=request,
             )
+
+
+def training_demonstrations(dataset):
+    """Two fixed train-only demonstrations; selection never reads model outputs."""
+    rows = rows_for(dataset, "train")
+    selected = [
+        min((r for r in rows if r["category"] == category), key=lambda r: r["id"])
+        for category in ("single_evidence", "missing_evidence")
+    ]
+    examples = [
+        {
+            "query": row["query"],
+            "COURSE_EVIDENCE": [
+                {"citation_label": i + 1, "quote": e["text"]}
+                for i, e in enumerate(row["evidence"])
+            ],
+            "answer": row["answer"],
+        }
+        for row in selected
+    ]
+    suffix = (
+        "\nFORMAT DEMONSTRATIONS ONLY. Their facts and citation labels are not evidence "
+        "for the current question. Answer the actual user payload using only its evidence.\n"
+        + json.dumps(examples, ensure_ascii=False, separators=(",", ":"))
+    )
+    return suffix, {
+        "train_manifest_sha256": sha256(dataset / "manifest.json"),
+        "example_ids": [r["id"] for r in selected],
+        "prompt_suffix": suffix,
+        "prompt_suffix_sha256": hashlib.sha256(suffix.encode()).hexdigest(),
+        "selection": "lowest train ID for single_evidence and missing_evidence",
+    }
+
+
+class FewShotAdapter:
+    def __init__(self, adapter, suffix):
+        self.adapter, self.suffix = adapter, suffix
+
+    async def generate(self, prompt):
+        return await self.adapter.generate(
+            replace(prompt, system_instruction=prompt.system_instruction + self.suffix)
+        )
 
 
 def prepare(source, output):
@@ -127,6 +171,14 @@ def prepare(source, output):
 
 async def evaluate(args):
     state = source_state()
+    suffix, demonstration_info = (
+        training_demonstrations(args.few_shot_training)
+        if args.few_shot_training
+        else ("", None)
+    )
+    variants = ["coursepilot-qwen3-base", "coursepilot-qwen3-sft"]
+    if suffix:
+        variants.append("coursepilot-qwen3-base-fewshot")
     manifest = json.loads((args.dataset / "manifest.json").read_text(encoding="utf-8"))
     if sha256(args.dataset / "cases.jsonl") != manifest["cases_sha256"]:
         raise ValueError("frozen external data changed")
@@ -148,23 +200,32 @@ async def evaluate(args):
         deployment = response.json()["experiment_provenance"]
         write_json(
             args.output / "provenance.json",
-            {"source": state, "dataset": manifest, "deployment": deployment},
+            {
+                "source": state,
+                "dataset": manifest,
+                "deployment": deployment,
+                "demonstrations": demonstration_info,
+                "variants": variants,
+            },
         )
         results = []
         with (args.output / "outputs.jsonl").open("x", encoding="utf-8") as handle:
             for index, row in enumerate(rows):
-                aliases = ["coursepilot-qwen3-base", "coursepilot-qwen3-sft"]
-                if index % 2:
-                    aliases.reverse()
+                offset = index % len(variants)
+                aliases = variants[offset:] + variants[:offset]
                 for alias in aliases:
                     transport = RecordingTransport()
                     adapter = OpenAICompatibleChatAdapter(
                         base_url=args.base_url,
                         api_key=token,
-                        model=alias,
+                        model="coursepilot-qwen3-base"
+                        if alias.endswith("-fewshot")
+                        else alias,
                         timeout_seconds=60,
                         transport=transport,
                     )
+                    if alias.endswith("-fewshot"):
+                        adapter = FewShotAdapter(adapter, suffix)
                     started = time.perf_counter()
                     response = await TrustedAgentCore(chat_adapter=adapter).run(
                         AgentRequest(
@@ -233,7 +294,7 @@ async def evaluate(args):
                     if r["model"] == alias
                 ),
             }
-            for alias in ("coursepilot-qwen3-base", "coursepilot-qwen3-sft")
+            for alias in variants
         }
         write_json(args.output / "summary.json", summary)
         print(json.dumps(summary))
@@ -246,6 +307,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--base-url", default="http://127.0.0.1:18080/v1")
+    parser.add_argument("--few-shot-training", type=Path)
     args = parser.parse_args()
     if args.mode == "prepare":
         prepare(args.source, args.output)
