@@ -143,6 +143,9 @@ def provenance(args):
         "quantization": "4-bit NF4 double quantization; BF16 compute",
         "external_model_api_used": False,
         "download_manifest_sha256": sha256(args.model / "download_manifest.json"),
+        "adapter_sha256": sha256(args.adapter / "adapter_model.safetensors")
+        if args.adapter
+        else None,
     }
 
 

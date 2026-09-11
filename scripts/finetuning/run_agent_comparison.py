@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 
+import httpx
 from run_experiment import source_state
 from sqlalchemy import select
 
@@ -37,6 +38,15 @@ async def run(args):
     args.output.mkdir(parents=True, exist_ok=False)
     completed = []
     try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(
+                args.base_url.rstrip("/") + "/models",
+                headers={"Authorization": "Bearer " + token},
+            )
+            response.raise_for_status()
+            inference_provenance = response.json()["experiment_provenance"]
+            if not inference_provenance.get("adapter_sha256"):
+                raise ValueError("inference endpoint must identify its adapter hash")
         async with sessions() as session:
             records = (
                 await session.execute(
@@ -101,6 +111,7 @@ async def run(args):
             json.dump(
                 {
                     "source": state,
+                    "inference_provenance": inference_provenance,
                     "reports": completed,
                     "limitations": [
                         "80 original internal demo QA; not independent external benchmark",

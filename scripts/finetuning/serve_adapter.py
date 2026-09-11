@@ -33,7 +33,8 @@ def serve(args):
         )
     model, tokenizer = load_model(args)
     model.eval()
-    print(json.dumps({"event": "loaded", **provenance(args)}), flush=True)
+    model_provenance = provenance(args)
+    print(json.dumps({"event": "loaded", **model_provenance}), flush=True)
 
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
@@ -66,6 +67,7 @@ def serve(args):
                     200,
                     {
                         "object": "list",
+                        "experiment_provenance": model_provenance,
                         "data": [
                             {"id": name, "object": "model"} for name in (BASE, TUNED)
                         ],
