@@ -2,6 +2,12 @@
 
 Updated 2026-09-11. In progress; not a final report or resume evidence.
 
+Latest: v1 given-evidence and full-chain runs are now complete and archived under
+`evaluation-reports/2026-09-11`. See `docs/evaluation/qwen3-v1-results.md` for the
+verified results and decision **not to promote v1**. Process IDs below are history.
+The next work is a better long-evidence/paraphrase train/dev distribution plus a
+new independent test; old tests remain regression data, not new blind evidence.
+
 Remote root: `/home/ccnu/Code/LXP/coursepilot-qwen3-sft`.
 Base model revision: `1cfa9a7208912126459214e8b04321603b3df60c`.
 Official-file SHA verification completed; `models/Qwen3-4B/download_manifest.json`

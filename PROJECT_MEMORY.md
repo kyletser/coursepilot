@@ -135,7 +135,7 @@ CoursePilot 的产品定位最终确定为：
 Adapter；后续需改善长证据/转述分布并使用新的未调参测试。不能把 170/172 词法匹配称为
 真实问答准确率，也不能把全链路的参考 claim 对齐指标称为语义引用准确率。
 
-2026-09-11 新增进行中目标：在用户授权服务器 `/home/ccnu/Code/LXP/coursepilot-qwen3-sft` 微调 Qwen3-4B，改善当前 Agent 并产出可追溯简历实验。协议见 `docs/evaluation/qwen3-finetuning-protocol.md`。2026-09-07 复核发现旧引用指标存在遗漏未归因引用的偏差，旧“引用准确率 100%”暂不再用于简历。训练结果尚未产生，不能声称微调完成或效果提升。
+2026-09-11 新增进行中目标：在用户授权服务器 `/home/ccnu/Code/LXP/coursepilot-qwen3-sft` 微调 Qwen3-4B，改善当前 Agent 并产出可追溯简历实验。协议见 `docs/evaluation/qwen3-finetuning-protocol.md`。2026-09-07 复核发现旧引用指标存在遗漏未归因引用的偏差，旧“引用准确率 100%”暂不再用于简历。v1 训练和对照已完成，默认模型发布门槛尚未通过，具体状态以上方最新记录为准。
 
 截至 2026-09-05：
 
