@@ -8,6 +8,15 @@ verified results and decision **not to promote v1**. Process IDs below are histo
 The next work is a better long-evidence/paraphrase train/dev distribution plus a
 new independent test; old tests remain regression data, not new blind evidence.
 
+V2 update: source `d3dbcefbfaa1e54464473384a0952a1f2a5dcdfd` exported to remote
+`source-v6`; dataset has 1,448 train / 236 dev / 180 test. Train/dev token-length
+preflight checked 1,684 examples, maximum 952 tokens, zero above the 2,048 budget.
+`runs/qlora-v3` starts fresh from base with one epoch (181 optimizer steps), not
+from v1's adapter. Then `runs/sft-v2-dev-v1` evaluates development generation.
+Log: `runs/qlora-v3-and-dev.log`. New test generation has not been scheduled yet.
+V1 inference process was stopped to release memory; the default Ollama was not
+changed. The original artifacts remain available for rollback and comparison.
+
 Remote root: `/home/ccnu/Code/LXP/coursepilot-qwen3-sft`.
 Base model revision: `1cfa9a7208912126459214e8b04321603b3df60c`.
 Official-file SHA verification completed; `models/Qwen3-4B/download_manifest.json`
