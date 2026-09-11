@@ -17,6 +17,18 @@ Log: `runs/qlora-v3-and-dev.log`. New test generation has not been scheduled yet
 V1 inference process was stopped to release memory; the default Ollama was not
 changed. The original artifacts remain available for rollback and comparison.
 
+External generation check prepared before any v2 test results: 50 CMRC trial
+questions, excluding the old retrieval benchmark's first 50 context questions.
+Ignored dataset path `tmp/finetuning/cmrc-generation-v1`; cases SHA256
+`6f98b74ae05dde4e36ccc0830d72543325f932db243703da05437018e45cc0be`.
+Source SHA256 `a976d1fd5efc173bd58ff1c57e958de5f49fed633a7bfb8e0e402e5490d75f5e`,
+CC BY-SA 4.0. `run_external_qa.py` reconstructs it deterministically from the local
+upstream file, records endpoint adapter provenance, and alternates model order.
+It reports span inclusion with the correct source label, not official CMRC EM/F1;
+summary fallbacks are separately counted so extractive fallback does not masquerade
+as successful model generation. This dataset is never used to train or select a
+checkpoint. No results exist yet.
+
 Remote root: `/home/ccnu/Code/LXP/coursepilot-qwen3-sft`.
 Base model revision: `1cfa9a7208912126459214e8b04321603b3df60c`.
 Official-file SHA verification completed; `models/Qwen3-4B/download_manifest.json`
