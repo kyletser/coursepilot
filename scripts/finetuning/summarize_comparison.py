@@ -16,9 +16,17 @@ def read(path):
 
 
 def summarize(args):
-    paths = [args.runs / name for name in ("base-test-v1", "sft-test-v1")]
+    paths = [args.runs / name for name in (args.base_run, args.sft_run)]
     summaries = [read(p / "summary.json") for p in paths]
     provenance = [read(p / "provenance.json") for p in paths]
+    for info in provenance:
+        if info.get("git_dirty") is not False:
+            raise ValueError("formal comparison requires clean source")
+        if info["arguments"]["split"] != "test" or info["arguments"]["limit"]:
+            raise ValueError("formal comparison requires the complete test split")
+    for key in ("max_new_tokens", "seed"):
+        if provenance[0]["arguments"][key] != provenance[1]["arguments"][key]:
+            raise ValueError(f"paired generation mismatch: {key}")
     for key in (
         "git_commit",
         "revision",
@@ -33,15 +41,16 @@ def summarize(args):
     for path, summary in zip(paths, summaries, strict=True):
         if sha256(path / "outputs.jsonl") != summary["raw_outputs_sha256"]:
             raise ValueError("raw output checksum mismatch")
-        outputs.append(
-            {
-                row["id"]: row
-                for row in map(
-                    json.loads,
-                    (path / "outputs.jsonl").read_text(encoding="utf-8").splitlines(),
-                )
-            }
+        records = list(
+            map(
+                json.loads,
+                (path / "outputs.jsonl").read_text(encoding="utf-8").splitlines(),
+            )
         )
+        indexed = {row["id"]: row for row in records}
+        if len(indexed) != len(records):
+            raise ValueError("duplicate paired case IDs")
+        outputs.append(indexed)
     gold = {r["id"]: r for r in rows_for(args.dataset, "test")}
     if set(gold) != set(outputs[0]) or set(gold) != set(outputs[1]):
         raise ValueError("incomplete paired test")
@@ -110,13 +119,13 @@ def summarize(args):
         "full_chain": full_chain,
         "source_provenance": provenance,
         "inference": read(args.agent / "comparison-index.json")["inference_provenance"],
-        "release_decision": "not promoted: extra false refusal on original course QA",
+        "release_decision": args.release_decision,
         "limitations": [
             "AI-assisted synthetic source-group holdout, not teacher blind labels",
             "lexical matching is not semantic faithfulness or answer correctness",
             "original course QA gold labels omit some valid source facts",
             "full-chain comparison is a regression test, not an independent external benchmark",
-            "one seed; single concurrency; unmerged LoRA inference is slower",
+            "one seed; single concurrency; unmerged LoRA latency reported separately",
         ],
     }
     write_json(args.output, result)
@@ -137,4 +146,9 @@ if __name__ == "__main__":
     parser.add_argument("--agent", type=Path, required=True)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--base-run", default="base-test-v1")
+    parser.add_argument("--sft-run", default="sft-test-v1")
+    parser.add_argument(
+        "--release-decision", default="pending evidence review; not promoted"
+    )
     summarize(parser.parse_args())
