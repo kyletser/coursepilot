@@ -17,10 +17,33 @@ from pathlib import Path
 import httpx
 from run_experiment import normalized, sha256, source_state, write_json
 
+# run_experiment establishes the API import path for standalone script use.
+# isort: split
 from app.agent import AgentRequest, OpenAICompatibleChatAdapter, TrustedAgentCore
 from app.agent.schemas import Evidence
 
 SOURCE_SHA = "a976d1fd5efc173bd58ff1c57e958de5f49fed633a7bfb8e0e402e5490d75f5e"
+
+
+class RecordingTransport(httpx.AsyncBaseTransport):
+    """Capture model responses before parsing/grounding; never record auth headers."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def handle_async_request(self, request):
+        async with httpx.AsyncHTTPTransport() as upstream:
+            response = await upstream.handle_async_request(request)
+            content = await response.aread()
+            self.calls.append(
+                {"status_code": response.status_code, "body": content.decode("utf-8")}
+            )
+            return httpx.Response(
+                response.status_code,
+                headers=response.headers,
+                content=content,
+                request=request,
+            )
 
 
 def prepare(source, output):
@@ -113,6 +136,8 @@ async def evaluate(args):
             (args.dataset / "cases.jsonl").read_text(encoding="utf-8").splitlines(),
         )
     )
+    if len(rows) != manifest["count"] or len({r["id"] for r in rows}) != len(rows):
+        raise ValueError("external case count or identity mismatch")
     token = os.environ["COURSEPILOT_INFERENCE_TOKEN"]
     args.output.mkdir(parents=True, exist_ok=False)
     async with httpx.AsyncClient(
@@ -132,11 +157,13 @@ async def evaluate(args):
                 if index % 2:
                     aliases.reverse()
                 for alias in aliases:
+                    transport = RecordingTransport()
                     adapter = OpenAICompatibleChatAdapter(
                         base_url=args.base_url,
                         api_key=token,
                         model=alias,
                         timeout_seconds=60,
+                        transport=transport,
                     )
                     started = time.perf_counter()
                     response = await TrustedAgentCore(chat_adapter=adapter).run(
@@ -171,6 +198,7 @@ async def evaluate(args):
                         "id": row["id"],
                         "model": alias,
                         "response": response.model_dump(mode="json"),
+                        "model_calls": transport.calls,
                         "reference_span_with_gold_source": supported_span,
                         "literal_supported_pairs": literal,
                         "all_pairs": len(pairs),
