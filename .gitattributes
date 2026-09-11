@@ -20,3 +20,6 @@ Dockerfile text eol=lf
 /experiments/qwen3-sft-v1/*.json -text
 /experiments/qwen3-sft-v1/*.jsonl -text
 /scripts/finetuning/curriculum.tsv -text
+/experiments/qwen3-sft-v2/*.json -text
+/experiments/qwen3-sft-v2/*.jsonl -text
+/scripts/finetuning/curriculum_v2.tsv -text
