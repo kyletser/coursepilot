@@ -19,7 +19,9 @@ MODEL = "Qwen/Qwen3-4B"
 REVISION = "1cfa9a7208912126459214e8b04321603b3df60c"
 
 
-def fetch_file(endpoint: str, root: Path, item: dict, download_revision: str) -> dict:
+def fetch_file(
+    endpoint: str, root: Path, item: dict, download_revision: str, model: str = MODEL
+) -> dict:
     name = item["rfilename"]
     target = root / name
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -46,7 +48,7 @@ def fetch_file(endpoint: str, root: Path, item: dict, download_revision: str) ->
         try:
             start = partial.stat().st_size if partial.exists() else 0
             request = urllib.request.Request(
-                f"{endpoint}/{MODEL}/resolve/{download_revision}/{name}",
+                f"{endpoint}/{model}/resolve/{download_revision}/{name}",
                 headers={
                     "User-Agent": "CoursePilot-model-download/1.0",
                     **({"Range": f"bytes={start}-"} if start else {}),
@@ -84,6 +86,9 @@ def main() -> None:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--endpoint", default="https://huggingface.co")
+    parser.add_argument("--model", default=MODEL)
+    parser.add_argument("--revision", default=REVISION)
+    parser.add_argument("--include-pytorch-bin", action="store_true")
     parser.add_argument(
         "--download-revision",
         default=REVISION,
@@ -91,27 +96,37 @@ def main() -> None:
     )
     args = parser.parse_args()
     metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
-    if metadata["sha"] != REVISION or metadata["id"] != MODEL:
+    if metadata["sha"] != args.revision or metadata["id"] != args.model:
         raise ValueError("upstream snapshot does not match pinned model/revision")
     files = [
         item
         for item in metadata["siblings"]
-        if item["rfilename"].endswith((".safetensors", ".json", ".txt"))
-        or item["rfilename"] == "LICENSE"
+        if (
+            "/" not in item["rfilename"] or item["rfilename"] == "1_Pooling/config.json"
+        )
+        and (
+            item["rfilename"].endswith((".safetensors", ".json", ".txt", ".model"))
+            or item["rfilename"] in {"LICENSE", "README.md"}
+            or (args.include_pytorch_bin and item["rfilename"] == "pytorch_model.bin")
+        )
     ]
     args.root.mkdir(parents=True, exist_ok=True)
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(
             executor.map(
                 lambda item: fetch_file(
-                    args.endpoint.rstrip("/"), args.root, item, args.download_revision
+                    args.endpoint.rstrip("/"),
+                    args.root,
+                    item,
+                    args.download_revision,
+                    args.model,
                 ),
                 files,
             )
         )
     manifest = {
-        "model": MODEL,
-        "revision": REVISION,
+        "model": args.model,
+        "revision": args.revision,
         "files": results,
         "download_endpoint": args.endpoint,
         "completed_at": time.time(),
