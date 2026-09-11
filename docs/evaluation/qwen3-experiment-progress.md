@@ -2,6 +2,27 @@
 
 Updated 2026-09-11. In progress; not a final report or resume evidence.
 
+## V2 candidate fixed before new test generation
+
+`runs/qlora-v3` completed 1 epoch / 181 optimizer steps on 1,448 training examples.
+Wall time 598.124 seconds; peak allocated GPU memory 6,640,988,160 bytes; development
+loss 0.0030913625. Saved adapter SHA256:
+`c7f642d6d89a6551b3d13f64a459673b87512ca5212b7833af58f223c18b92c3`.
+Dataset manifest SHA256:
+`cc886080e4c6f609792285e0c7466f7ad5689746b84b1c62679bba202f5f8cf0`.
+
+The 236-case development generation completed: 231 lexical-proxy successes,
+64/64 unanswerable refusals, 2/172 false refusals, all schema-valid. Five proxy
+failures were inspected: two abstentions, one wrong fact selection, and two extra
+fact/label mismatches. These are development observations, not independent results.
+No training/prompt edits are planned for this candidate. Fix its hash now and run
+the new 180-case base/SFT test with `source-v6`, followed by the original 80-case
+course regression and the frozen external 50-case transfer check. If it fails,
+retain results and do not promote by selecting favorable cases.
+
+Training/dev process has exited and released GPU 0. Historical live-process notes
+below remain only as an execution history, not current state.
+
 Latest: v1 given-evidence and full-chain runs are now complete and archived under
 `evaluation-reports/2026-09-11`. See `docs/evaluation/qwen3-v1-results.md` for the
 verified results and decision **not to promote v1**. Process IDs below are history.
