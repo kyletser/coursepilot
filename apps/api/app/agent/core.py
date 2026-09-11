@@ -240,6 +240,15 @@ class TrustedAgentCore:
                     feedback = [f"Adapter output failed schema validation: {exc}"]
                     continue
 
+                if not draft.claims:
+                    return self._insufficient_response(
+                        route=route,
+                        budget=budget,
+                        accepted=accepted,
+                        rewritten_query=rewritten_query,
+                        warnings=[*warnings, "MODEL_ABSTAINED"],
+                    )
+
                 citations = bind_claims_to_citations(draft.claims, base_citations)
                 citations = [item for item in citations if item.claim_indices]
                 budget.record_step("verify_grounding")

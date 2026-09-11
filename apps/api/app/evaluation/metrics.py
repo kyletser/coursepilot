@@ -254,7 +254,7 @@ def evaluate_citations(cases: Iterable[CitationCase]) -> CitationMetrics:
     covered_count = sum(
         len(
             case.required_claim_ids.intersection(
-                citation.claim_id for citation in case.citations
+                citation.claim_id for citation in case.citations if citation.is_accurate
             )
         )
         for case in normalized

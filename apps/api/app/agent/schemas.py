@@ -161,7 +161,9 @@ class AnswerDraft(StrictModel):
     final answer from individually cited claims so uncited prose cannot slip through.
     """
 
-    claims: list[ClaimDraft] = Field(min_length=1, max_length=20)
+    # An explicit empty list is a model abstention, handled by the trusted core.
+    # A missing field or malformed response remains a validation error.
+    claims: list[ClaimDraft] = Field(max_length=20)
 
 
 class Citation(StrictModel):

@@ -1088,7 +1088,7 @@ async def run_three_baselines(
         return ThreeBaselineResult(report_path, report, run_ids)
 
 
-CASE_EVALUATION_REPORT_SCHEMA_VERSION = "coursepilot.case-evaluation-report/1.0.0"
+CASE_EVALUATION_REPORT_SCHEMA_VERSION = "coursepilot.case-evaluation-report/2.0.0"
 DETERMINISTIC_ROUTER_VERSION = "coursepilot-deterministic-intent-rules/v1"
 PATH_PLANNER_VERSION = "coursepilot-prerequisite-topological-planner/v1"
 LEXICAL_GROUNDING_VERSION = "coursepilot-lexical-claim-support/v1"
@@ -1793,58 +1793,49 @@ def _qa_judgments(
     labeled_claims: Mapping[str, _LabeledClaim],
     scope: frozenset[str],
 ) -> list[dict[str, Any]]:
-    """Deterministically judge every cited (claim, chunk) pair in the answer.
+    """Count every generated claim/citation pair, including unaligned pairs.
 
-    Citation accuracy must stay deterministic (spec §11.3), so ``supports_claim``
-    comes from frozen human labels when available and only falls back to the same
-    lexical support checker the grounding verifier uses at runtime.
+    This is a conservative lexical attribution proxy, not semantic entailment.
+    Gold source membership alone cannot align a generated statement to a claim.
+    Unaligned statements remain in the denominator and receive no coverage credit.
     """
 
-    evidence_chunks = {item.chunk_id for item in response.evidence}
     evidence_text = {item.chunk_id: item.text for item in response.evidence}
+    citations_by_label = {item.label: item for item in response.citations}
     judgments: list[dict[str, Any]] = []
-    seen_pairs: set[tuple[str, str]] = set()
-    for citation in response.citations:
-        if not citation.claim_indices:
-            continue
-        generated_texts = [
-            response.claims[index].text
-            for index in citation.claim_indices
-            if index < len(response.claims)
+    for index, generated in enumerate(response.claims):
+        aligned = [
+            (claim_id, labeled)
+            for claim_id, labeled in labeled_claims.items()
+            if lexical_claim_support(labeled.text, generated.text)
+            and lexical_claim_support(generated.text, labeled.text)
         ]
-        for claim_id, labeled in labeled_claims.items():
-            # Frozen supporting-chunk labels are the deterministic gold mapping.
-            # A model may faithfully paraphrase the labeled claim with little
-            # character overlap; requiring label-to-generation lexical overlap
-            # undercounts valid citations even after runtime grounding has already
-            # verified every generated claim against this exact evidence chunk.
-            attributed = (
-                citation.chunk_id in labeled.supporting_chunk_ids
-                if labeled.supporting_chunk_ids is not None
-                else any(
-                    lexical_claim_support(labeled.text, generated_text)
-                    for generated_text in generated_texts
-                )
+        for label in generated.citation_labels:
+            citation = citations_by_label.get(label)
+            chunk_id = citation.chunk_id if citation is not None else f"unknown-{label}"
+            candidates = [
+                (claim_id, labeled)
+                for claim_id, labeled in aligned
+                if labeled.supporting_chunk_ids is None
+                or chunk_id in labeled.supporting_chunk_ids
+            ]
+            claim_id = (
+                candidates[0][0] if candidates else f"__unaligned_generated_{index}"
             )
-            if not attributed:
-                continue
-            pair = (claim_id, citation.chunk_id)
-            if pair in seen_pairs:
-                continue
-            seen_pairs.add(pair)
-            if labeled.supporting_chunk_ids is not None:
-                supports = citation.chunk_id in labeled.supporting_chunk_ids
-            else:
-                supports = lexical_claim_support(
-                    labeled.text, evidence_text.get(citation.chunk_id, "")
-                )
+            exists = citation is not None and chunk_id in evidence_text
+            binding_valid = citation is not None and index in citation.claim_indices
+            supports = bool(candidates) and lexical_claim_support(
+                generated.text, evidence_text.get(chunk_id, "")
+            )
             judgments.append(
                 {
                     "claim_id": claim_id,
-                    "citation_id": citation.chunk_id,
-                    "citation_exists": citation.chunk_id in evidence_chunks,
-                    "belongs_to_expected_scope": citation.chunk_id in scope,
-                    "supports_claim": supports,
+                    # Preserve one record per generated pair, even when two
+                    # generated claims align to the same gold claim and source.
+                    "citation_id": f"{chunk_id}#generated-{index}",
+                    "citation_exists": exists,
+                    "belongs_to_expected_scope": chunk_id in scope,
+                    "supports_claim": supports and binding_valid,
                 }
             )
     return judgments
@@ -2017,6 +2008,7 @@ async def run_end_to_end_qa_evaluation(
                 chat_adapter=chat_adapter,
                 router=ValidatedIntentRouter(),
             )
+            case_started = time.perf_counter()
             response = await core.run(request)
             if response.status == AgentStatus.RETRIEVAL_UNAVAILABLE:
                 raise _case_error(
@@ -2041,6 +2033,8 @@ async def run_end_to_end_qa_evaluation(
                 "answer": response.answer,
                 "warnings": list(response.warnings),
                 "retrieval_trace_count": len(evidence_retriever.traces),
+                "latency_ms": round((time.perf_counter() - case_started) * 1000, 3),
+                "citation_judgment_version": "generated-pair-lexical-v2",
             }
         duration_ms = (time.perf_counter() - started) * 1000
 

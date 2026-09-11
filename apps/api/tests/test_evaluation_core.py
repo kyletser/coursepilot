@@ -68,7 +68,7 @@ def test_citation_and_abstention_metrics_keep_denominators_visible() -> None:
     )
 
     assert citation_result.citation_accuracy == pytest.approx(1 / 3)
-    assert citation_result.citation_coverage == 1.0
+    assert citation_result.citation_coverage == 0.5
     assert citation_result.citation_count == 3
     assert abstention_result.unanswerable_refusal_rate == 0.5
     assert abstention_result.false_refusal_rate == 0.5

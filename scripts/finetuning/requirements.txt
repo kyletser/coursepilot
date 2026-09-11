@@ -1,0 +1,8 @@
+# Training-only environment; the API runtime does not depend on these packages.
+# Torch 2.7.0 is supplied by the experiment host; record pip freeze per run.
+transformers==4.51.3
+peft==0.15.2
+accelerate==1.6.0
+bitsandbytes==0.45.5
+datasets==3.5.0
+safetensors==0.5.3

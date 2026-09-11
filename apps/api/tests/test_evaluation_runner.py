@@ -937,7 +937,7 @@ async def test_case_runner_executes_end_to_end_qa_pipeline(app_instance, tmp_pat
     assert answerable["citations"] == [
         {
             "claim_id": "claim-lookup",
-            "citation_id": str(base["target_id"]),
+            "citation_id": f"{base['target_id']}#generated-0",
             "citation_exists": True,
             "belongs_to_expected_scope": True,
             "supports_claim": True,
@@ -1011,7 +1011,7 @@ async def test_qa_runner_requires_active_index(app_instance, tmp_path):
         assert await session.scalar(select(func.count(EvalRun.id))) == 0
 
 
-async def test_qa_runner_credits_grounded_paraphrase_using_frozen_chunk_label(
+async def test_qa_runner_does_not_infer_claim_alignment_from_source_id_alone(
     app_instance, tmp_path
 ):
     base = await _seed_case_base(app_instance)
@@ -1051,8 +1051,8 @@ async def test_qa_runner_credits_grounded_paraphrase_using_frozen_chunk_label(
         chat_adapter_factory=lambda: FakeChatAdapter(TARGET_QA_CONTENT),
         **_PROVENANCE_KWARGS,
     )
-    assert result.report["metrics"]["citations"]["citation_accuracy"] == 1.0
-    assert result.report["metrics"]["citations"]["citation_coverage"] == 1.0
+    assert result.report["metrics"]["citations"]["citation_accuracy"] == 0.0
+    assert result.report["metrics"]["citations"]["citation_coverage"] == 0.0
 
 
 async def test_qa_runner_requires_labels_before_running(app_instance, tmp_path):
