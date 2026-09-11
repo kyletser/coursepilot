@@ -1,6 +1,11 @@
 # Qwen3 experiment execution record
 
-Updated 2026-09-11. In progress; not a final report or resume evidence.
+Updated 2026-09-11. Execution history; the completed conclusions are in
+`qwen3-final-report.md`. Historical "pending" and PID notes below are retained
+as history, not live state. Two training rounds and all scheduled comparisons
+have completed. No additional training is planned. Default Ollama is unchanged.
+The user clarified that micro-tuning need not improve accuracy: demonstrating
+actual training, evaluation and technical understanding is the objective.
 
 ## V2 candidate fixed before new test generation
 

@@ -29,10 +29,11 @@ def summarize(args):
     provenance = json.loads((args.run / "provenance.json").read_text(encoding="utf-8"))
     if provenance["source"]["git_dirty"] is not False:
         raise ValueError("dirty evaluation source")
+    output_path = args.run / getattr(args, "outputs_name", "outputs.jsonl")
     rows = list(
         map(
             json.loads,
-            (args.run / "outputs.jsonl").read_text(encoding="utf-8").splitlines(),
+            output_path.read_text(encoding="utf-8").splitlines(),
         )
     )
     summaries = {}
@@ -129,7 +130,7 @@ def summarize(args):
             if variant != "coursepilot-qwen3-base"
         },
         "provenance": provenance,
-        "raw_outputs_sha256": sha256(args.run / "outputs.jsonl"),
+        "raw_outputs_sha256": sha256(output_path),
         "limitations": [
             "selected evidence-conditioned CMRC trial questions; not official EM/F1",
             "reference-span inclusion with source label does not prove whole-answer correctness",
@@ -147,4 +148,5 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--outputs-name", default="outputs.jsonl")
     summarize(parser.parse_args())

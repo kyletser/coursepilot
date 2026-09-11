@@ -1,0 +1,311 @@
+{
+  "schema": "coursepilot.external-generation-audit/1",
+  "summaries": {
+    "coursepilot-qwen3-base": {
+      "count": 100,
+      "first_output_schema_valid": 99,
+      "first_output_empty_claims": 46,
+      "first_output_span_with_gold_source": 48,
+      "answered_span_with_gold_source": 47,
+      "answerable_count": 50,
+      "unanswerable_count": 50,
+      "refused_unanswerable_count": 46,
+      "false_refusal_count": 0,
+      "first_output_refused_unanswerable": 46,
+      "first_output_false_refusals": 0,
+      "task_success_count": 93,
+      "status_counts": {
+        "ANSWERED": 52,
+        "INSUFFICIENT_EVIDENCE": 46,
+        "EVIDENCE_SUMMARY": 2
+      },
+      "prompt_tokens_including_retries": 134818,
+      "completion_tokens_including_retries": 3131,
+      "latency_ms_p50": 624.6874499993282,
+      "latency_ms_p95": 1623.7746950002456
+    },
+    "coursepilot-qwen3-sft": {
+      "count": 100,
+      "first_output_schema_valid": 100,
+      "first_output_empty_claims": 50,
+      "first_output_span_with_gold_source": 47,
+      "answered_span_with_gold_source": 47,
+      "answerable_count": 50,
+      "unanswerable_count": 50,
+      "refused_unanswerable_count": 50,
+      "false_refusal_count": 0,
+      "first_output_refused_unanswerable": 50,
+      "first_output_false_refusals": 0,
+      "task_success_count": 97,
+      "status_counts": {
+        "ANSWERED": 50,
+        "INSUFFICIENT_EVIDENCE": 50
+      },
+      "prompt_tokens_including_retries": 132239,
+      "completion_tokens_including_retries": 2084,
+      "latency_ms_p50": 553.9700000008452,
+      "latency_ms_p95": 1922.9807949988754
+    },
+    "coursepilot-qwen3-base-fewshot": {
+      "count": 100,
+      "first_output_schema_valid": 95,
+      "first_output_empty_claims": 37,
+      "first_output_span_with_gold_source": 48,
+      "answered_span_with_gold_source": 48,
+      "answerable_count": 50,
+      "unanswerable_count": 50,
+      "refused_unanswerable_count": 36,
+      "false_refusal_count": 1,
+      "first_output_refused_unanswerable": 36,
+      "first_output_false_refusals": 1,
+      "task_success_count": 84,
+      "status_counts": {
+        "ANSWERED": 59,
+        "INSUFFICIENT_EVIDENCE": 37,
+        "EVIDENCE_SUMMARY": 4
+      },
+      "prompt_tokens_including_retries": 169559,
+      "completion_tokens_including_retries": 2779,
+      "latency_ms_p50": 665.7841500018549,
+      "latency_ms_p95": 1541.3735950027328
+    }
+  },
+  "paired_answered_span_vs_base": {
+    "coursepilot-qwen3-sft": {
+      "wins": [
+        "TRIAL_47_QUERY_0-present",
+        "TRIAL_569_QUERY_1-present"
+      ],
+      "regressions": [
+        "TRIAL_482_QUERY_0-present",
+        "TRIAL_615_QUERY_2-present"
+      ]
+    },
+    "coursepilot-qwen3-base-fewshot": {
+      "wins": [
+        "TRIAL_47_QUERY_0-present",
+        "TRIAL_569_QUERY_1-present"
+      ],
+      "regressions": [
+        "TRIAL_516_QUERY_2-present"
+      ]
+    }
+  },
+  "paired_task_vs_base": {
+    "coursepilot-qwen3-sft": {
+      "wins": [
+        "TRIAL_47_QUERY_0-present",
+        "TRIAL_495_QUERY_1-missing",
+        "TRIAL_519_QUERY_0-missing",
+        "TRIAL_53_QUERY_2-missing",
+        "TRIAL_541_QUERY_0-missing",
+        "TRIAL_569_QUERY_1-present"
+      ],
+      "regressions": [
+        "TRIAL_482_QUERY_0-present",
+        "TRIAL_615_QUERY_2-present"
+      ]
+    },
+    "coursepilot-qwen3-base-fewshot": {
+      "wins": [
+        "TRIAL_47_QUERY_0-present",
+        "TRIAL_569_QUERY_1-present"
+      ],
+      "regressions": [
+        "TRIAL_467_QUERY_0-missing",
+        "TRIAL_473_QUERY_1-missing",
+        "TRIAL_47_QUERY_0-missing",
+        "TRIAL_488_QUERY_0-missing",
+        "TRIAL_516_QUERY_2-present",
+        "TRIAL_560_QUERY_2-missing",
+        "TRIAL_582_QUERY_0-missing",
+        "TRIAL_607_QUERY_0-missing",
+        "TRIAL_616_QUERY_0-missing",
+        "TRIAL_624_QUERY_0-missing",
+        "TRIAL_645_QUERY_0-missing"
+      ]
+    }
+  },
+  "provenance": {
+    "source": {
+      "git_commit": "65e779011d18e788b0ff5a2632266d27d79c1ae0",
+      "git_dirty": false
+    },
+    "dataset": {
+      "source": "https://github.com/ymcui/cmrc2018",
+      "source_sha256": "a976d1fd5efc173bd58ff1c57e958de5f49fed633a7bfb8e0e402e5490d75f5e",
+      "license": "CC-BY-SA-4.0",
+      "count": 100,
+      "groups": 50,
+      "cases_sha256": "1de33d7b552a9d1be3045c913d072f5ccc673648b874202165f3eac91a5be0c6",
+      "excluded_context_ids": [
+        "TRIAL_106",
+        "TRIAL_109",
+        "TRIAL_11",
+        "TRIAL_110",
+        "TRIAL_111",
+        "TRIAL_114",
+        "TRIAL_12",
+        "TRIAL_122",
+        "TRIAL_123",
+        "TRIAL_124",
+        "TRIAL_125",
+        "TRIAL_126",
+        "TRIAL_131",
+        "TRIAL_137",
+        "TRIAL_141",
+        "TRIAL_142",
+        "TRIAL_150",
+        "TRIAL_154",
+        "TRIAL_155",
+        "TRIAL_157",
+        "TRIAL_160",
+        "TRIAL_161",
+        "TRIAL_163",
+        "TRIAL_177",
+        "TRIAL_178",
+        "TRIAL_184",
+        "TRIAL_187",
+        "TRIAL_188",
+        "TRIAL_193",
+        "TRIAL_194",
+        "TRIAL_196",
+        "TRIAL_199",
+        "TRIAL_20",
+        "TRIAL_200",
+        "TRIAL_202",
+        "TRIAL_203",
+        "TRIAL_205",
+        "TRIAL_21",
+        "TRIAL_210",
+        "TRIAL_211",
+        "TRIAL_213",
+        "TRIAL_221",
+        "TRIAL_229",
+        "TRIAL_230",
+        "TRIAL_231",
+        "TRIAL_234",
+        "TRIAL_235",
+        "TRIAL_236",
+        "TRIAL_239",
+        "TRIAL_245",
+        "TRIAL_258",
+        "TRIAL_259",
+        "TRIAL_263",
+        "TRIAL_265",
+        "TRIAL_268",
+        "TRIAL_269",
+        "TRIAL_27",
+        "TRIAL_270",
+        "TRIAL_271",
+        "TRIAL_273",
+        "TRIAL_274",
+        "TRIAL_277",
+        "TRIAL_281",
+        "TRIAL_282",
+        "TRIAL_284",
+        "TRIAL_286",
+        "TRIAL_295",
+        "TRIAL_299",
+        "TRIAL_300",
+        "TRIAL_303",
+        "TRIAL_309",
+        "TRIAL_310",
+        "TRIAL_311",
+        "TRIAL_321",
+        "TRIAL_326",
+        "TRIAL_327",
+        "TRIAL_334",
+        "TRIAL_336",
+        "TRIAL_341",
+        "TRIAL_345",
+        "TRIAL_352",
+        "TRIAL_355",
+        "TRIAL_359",
+        "TRIAL_363",
+        "TRIAL_368",
+        "TRIAL_375",
+        "TRIAL_393",
+        "TRIAL_405",
+        "TRIAL_409",
+        "TRIAL_411",
+        "TRIAL_420",
+        "TRIAL_421",
+        "TRIAL_422",
+        "TRIAL_423",
+        "TRIAL_425",
+        "TRIAL_426",
+        "TRIAL_427",
+        "TRIAL_432",
+        "TRIAL_435",
+        "TRIAL_438"
+      ],
+      "previous_cases_sha256": "6f98b74ae05dde4e36ccc0830d72543325f932db243703da05437018e45cc0be",
+      "answer_keys_sha256": "e7e2a67edbec63703c1c36d6fb2ea462f1683dcc7f2a51da9ca97196961f26f1",
+      "answer_key_origin": "AI-reviewed atomic keys from official reference answers, fixed before any model output; not independent human review",
+      "selection": "sorted unseen contexts; length100..1200; first query with all reference answers 2..12 normalized chars present verbatim; one query per context",
+      "negative_construction": "replace target by two unrelated passages containing none of the reference answers; NOT naturally unanswerable CMRC labels",
+      "scope": "given-evidence short answers plus constructed missing-evidence pairs; not official CMRC; not whole-answer semantic accuracy",
+      "primary_metric": "positive: all predeclared atomic answer groups in gold-source claims and ANSWERED; negative: INSUFFICIENT_EVIDENCE",
+      "seed": 20260914,
+      "training_used": false
+    },
+    "deployment": {
+      "git_commit": "d3dbcefbfaa1e54464473384a0952a1f2a5dcdfd",
+      "git_dirty": false,
+      "exported_files_verified": 204,
+      "source_manifest_sha256": "1ac092842558cfe0315407b9d3101ac4b9b87316415e0fde37b81b31ac92b662",
+      "base_model": "Qwen/Qwen3-4B",
+      "revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+      "arguments": {
+        "model": "models/Qwen3-4B",
+        "adapter": "runs/qlora-v3/adapter",
+        "dataset": "source-v6/experiments/qwen3-sft-v2",
+        "port": 18080,
+        "max_new_tokens": 384,
+        "seed": 20260911
+      },
+      "dataset_manifest_sha256": "cc886080e4c6f609792285e0c7466f7ad5689746b84b1c62679bba202f5f8cf0",
+      "python": "3.12.7",
+      "host": "node16",
+      "gpu": "NVIDIA GeForce RTX 4090 D",
+      "torch_cuda": "12.6",
+      "bnb_cuda_version_override": "124",
+      "cuda_visible_devices": "0",
+      "packages": {
+        "torch": "2.7.0",
+        "transformers": "4.51.3",
+        "peft": "0.15.2",
+        "accelerate": "1.6.0",
+        "bitsandbytes": "0.45.5"
+      },
+      "quantization": "4-bit NF4 double quantization; BF16 compute",
+      "external_model_api_used": false,
+      "download_manifest_sha256": "b8f335d4408127fee659d67aaed467fd5a0e9956740cc849629c49883dafff75",
+      "adapter_sha256": "c7f642d6d89a6551b3d13f64a459673b87512ca5212b7833af58f223c18b92c3"
+    },
+    "demonstrations": {
+      "train_manifest_sha256": "cc886080e4c6f609792285e0c7466f7ad5689746b84b1c62679bba202f5f8cf0",
+      "example_ids": [
+        "v2-original-train-0000",
+        "v2-original-train-0006"
+      ],
+      "prompt_suffix": "\nFORMAT DEMONSTRATIONS ONLY. Their facts and citation labels are not evidence for the current question. Answer the actual user payload using only its evidence.\n[{\"query\":\"顺序表怎样支持按下标访问？\",\"COURSE_EVIDENCE\":[{\"citation_label\":1,\"quote\":\"计数信号量可以表示一类可用资源的数量，通过等待和释放操作协调资源使用。\"},{\"citation_label\":2,\"quote\":\"在顺序表中间插入元素通常需要移动后续元素，最坏时间复杂度为 O(n)。\"},{\"citation_label\":3,\"quote\":\"顺序表把元素存放在连续存储空间中，可以根据首地址和下标计算元素位置。\"},{\"citation_label\":4,\"quote\":\"文件描述符是进程用于引用已打开文件或类似资源的整数标识。\"}],\"answer\":{\"claims\":[{\"text\":\"顺序表把元素存放在连续存储空间中，可以根据首地址和下标计算元素位置。\",\"citation_labels\":[3]}]}},{\"query\":\"顺序表怎样支持按下标访问？\",\"COURSE_EVIDENCE\":[{\"citation_label\":1,\"quote\":\"文件描述符是进程用于引用已打开文件或类似资源的整数标识。\"},{\"citation_label\":2,\"quote\":\"计数信号量可以表示一类可用资源的数量，通过等待和释放操作协调资源使用。\"}],\"answer\":{\"claims\":[]}}]",
+      "prompt_suffix_sha256": "5eb1b916df797d332e53a0e5effb7d9e81f965c253b733484d1996b475bb838a",
+      "selection": "lowest train ID for single_evidence and missing_evidence"
+    },
+    "variants": [
+      "coursepilot-qwen3-base",
+      "coursepilot-qwen3-sft",
+      "coursepilot-qwen3-base-fewshot"
+    ]
+  },
+  "raw_outputs_sha256": "9f56e6283a52e2c32c3f15d0ea595b37506d36f89441b79a2da956320bedb00b",
+  "limitations": [
+    "selected evidence-conditioned CMRC trial questions; not official EM/F1",
+    "reference-span inclusion with source label does not prove whole-answer correctness",
+    "missing-evidence negatives, if present, are constructed; see per-variant denominators",
+    "public dataset may have appeared in base-model pretraining; exposure is unknown",
+    "few-shot uses longer context; timings single concurrency and include HTTP/Agent overhead"
+  ]
+}

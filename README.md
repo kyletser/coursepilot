@@ -118,6 +118,18 @@ python -m venv .venv
 
 CI 对每个提交执行后端迁移与测试、前端 lint/typecheck/build，以及 Compose 配置与容器内迁移冒烟。入口配置见 [`.env.example`](.env.example)，完整产品约束与里程碑见 [`spec.md`](spec.md)。
 
+## Qwen3 微调与面试材料
+
+已完成 Qwen3-4B 两轮 QLoRA 训练、原模型/two-shot/适配器对照，以及真实课程
+Agent 接入验证。微调作为技术实践与取舍实验，不声称全面提高准确率，默认
+Ollama 配置保持不变。
+
+- [最终实验报告](docs/evaluation/qwen3-final-report.md)
+- [可直接使用的简历项目块](docs/interview/coursepilot-resume-final.md)
+- [微调原理与面试追问](docs/interview/qwen3-finetuning-explained.md)
+- [训练、评测和部署复现](scripts/finetuning/README.md)
+- [机器报告与原始记录归档](evaluation-reports/2026-09-11/README.md)
+
 ## 数据与安全边界
 
 - 不提交真实教材、课程私有资料、API Key、JWT Secret 或数据库密码。

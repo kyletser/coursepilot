@@ -1,0 +1,443 @@
+{
+  "schema": "coursepilot.qwen3-paired-summary/1",
+  "given_evidence": {
+    "base": {
+      "schema": "coursepilot.sft-evidence-eval/1",
+      "scope": "given-evidence real Agent; not retrieval end-to-end",
+      "raw_model": {
+        "count": 180,
+        "schema_valid_rate": 0.9888888888888889,
+        "exact_match_rate": 0.5555555555555556,
+        "task_success_proxy_rate": 0.8166666666666667,
+        "supported_pairs_proxy": 83,
+        "claim_citation_pairs": 114,
+        "citation_support_proxy_rate": 0.7280701754385965,
+        "unanswerable_count": 80,
+        "answerable_count": 100,
+        "refused_unanswerable_count": 74,
+        "false_refusal_count": 0,
+        "mean_answer_char_f1": 0.8468824236753306
+      },
+      "guarded_agent": {
+        "count": 180,
+        "schema_valid_rate": 1.0,
+        "exact_match_rate": 0.5666666666666667,
+        "task_success_proxy_rate": 0.8333333333333334,
+        "supported_pairs_proxy": 84,
+        "claim_citation_pairs": 116,
+        "citation_support_proxy_rate": 0.7241379310344828,
+        "unanswerable_count": 80,
+        "answerable_count": 100,
+        "refused_unanswerable_count": 76,
+        "false_refusal_count": 0,
+        "mean_answer_char_f1": 0.8563526769277762
+      },
+      "categories": {
+        "new_long": {
+          "count": 40,
+          "schema_valid_rate": 1.0,
+          "exact_match_rate": 0.175,
+          "task_success_proxy_rate": 0.675,
+          "supported_pairs_proxy": 29,
+          "claim_citation_pairs": 42,
+          "citation_support_proxy_rate": 0.6904761904761905,
+          "unanswerable_count": 0,
+          "answerable_count": 40,
+          "refused_unanswerable_count": 0,
+          "false_refusal_count": 0,
+          "mean_answer_char_f1": 0.7906047362518167
+        },
+        "new_missing": {
+          "count": 40,
+          "schema_valid_rate": 0.975,
+          "exact_match_rate": 0.85,
+          "task_success_proxy_rate": 0.85,
+          "supported_pairs_proxy": 0,
+          "claim_citation_pairs": 5,
+          "citation_support_proxy_rate": 0.0,
+          "unanswerable_count": 40,
+          "answerable_count": 0,
+          "refused_unanswerable_count": 34,
+          "false_refusal_count": 0,
+          "mean_answer_char_f1": null
+        },
+        "new_multi": {
+          "count": 20,
+          "schema_valid_rate": 0.95,
+          "exact_match_rate": 0.1,
+          "task_success_proxy_rate": 0.4,
+          "supported_pairs_proxy": 16,
+          "claim_citation_pairs": 27,
+          "citation_support_proxy_rate": 0.5925925925925926,
+          "unanswerable_count": 0,
+          "answerable_count": 20,
+          "refused_unanswerable_count": 0,
+          "false_refusal_count": 0,
+          "mean_answer_char_f1": 0.8405495905134852
+        },
+        "new_short": {
+          "count": 40,
+          "schema_valid_rate": 1.0,
+          "exact_match_rate": 0.425,
+          "task_success_proxy_rate": 0.95,
+          "supported_pairs_proxy": 38,
+          "claim_citation_pairs": 40,
+          "citation_support_proxy_rate": 0.95,
+          "unanswerable_count": 0,
+          "answerable_count": 40,
+          "refused_unanswerable_count": 0,
+          "false_refusal_count": 0,
+          "mean_answer_char_f1": 0.9063265276797671
+        },
+        "new_unspecified": {
+          "count": 40,
+          "schema_valid_rate": 1.0,
+          "exact_match_rate": 1.0,
+          "task_success_proxy_rate": 1.0,
+          "supported_pairs_proxy": 0,
+          "claim_citation_pairs": 0,
+          "citation_support_proxy_rate": null,
+          "unanswerable_count": 40,
+          "answerable_count": 0,
+          "refused_unanswerable_count": 40,
+          "false_refusal_count": 0,
+          "mean_answer_char_f1": null
+        }
+      },
+      "agent_status_counts": {
+        "INSUFFICIENT_EVIDENCE": 76,
+        "ANSWERED": 102,
+        "EVIDENCE_SUMMARY": 2
+      },
+      "latency_ms": {
+        "p50": 663.3870680088876,
+        "p95": 1322.7522833476542
+      },
+      "total_output_tokens": 5656,
+      "total_generation_seconds": 104.3568622219027,
+      "peak_gpu_allocated_bytes": 2871680000,
+      "raw_outputs_sha256": "5ff81d2b7791c6f606cbeccd6477b1665886e40c8c8bc874a3068beee1c55e70",
+      "limitations": [
+        "AI-assisted synthetic source-group holdout",
+        "lexical support proxy, not semantic proof",
+        "single concurrency; no retrieval timing; no external model API"
+      ]
+    },
+    "sft": {
+      "schema": "coursepilot.sft-evidence-eval/1",
+      "scope": "given-evidence real Agent; not retrieval end-to-end",
+      "raw_model": {
+        "count": 180,
+        "schema_valid_rate": 1.0,
+        "exact_match_rate": 0.9777777777777777,
+        "task_success_proxy_rate": 0.9833333333333333,
+        "supported_pairs_proxy": 117,
+        "claim_citation_pairs": 119,
+        "citation_support_proxy_rate": 0.9831932773109243,
+        "unanswerable_count": 80,
+        "answerable_count": 100,
+        "refused_unanswerable_count": 80,
+        "false_refusal_count": 1,
+        "mean_answer_char_f1": 0.979443670709782
+      },
+      "guarded_agent": {
+        "count": 180,
+        "schema_valid_rate": 1.0,
+        "exact_match_rate": 0.9777777777777777,
+        "task_success_proxy_rate": 0.9833333333333333,
+        "supported_pairs_proxy": 117,
+        "claim_citation_pairs": 119,
+        "citation_support_proxy_rate": 0.9831932773109243,
+        "unanswerable_count": 80,
+        "answerable_count": 100,
+        "refused_unanswerable_count": 80,
+        "false_refusal_count": 1,
+        "mean_answer_char_f1": 0.979443670709782
+      },
+      "categories": {
+        "new_long": {
+          "count": 40,
+          "schema_valid_rate": 1.0,
+          "exact_match_rate": 0.9,
+          "task_success_proxy_rate": 0.925,
+          "supported_pairs_proxy": 37,
+          "claim_citation_pairs": 39,
+          "citation_support_proxy_rate": 0.9487179487179487,
+          "unanswerable_count": 0,
+          "answerable_count": 40,
+          "refused_unanswerable_count": 0,
+          "false_refusal_count": 1,
+          "mean_answer_char_f1": 0.9486091767744549
+        },
+        "new_missing": {
+          "count": 40,
+          "schema_valid_rate": 1.0,
+          "exact_match_rate": 1.0,
+          "task_success_proxy_rate": 1.0,
+          "supported_pairs_proxy": 0,
+          "claim_citation_pairs": 0,
+          "citation_support_proxy_rate": null,
+          "unanswerable_count": 40,
+          "answerable_count": 0,
+          "refused_unanswerable_count": 40,
+          "false_refusal_count": 0,
+          "mean_answer_char_f1": null
+        },
+        "new_multi": {
+          "count": 20,
+          "schema_valid_rate": 1.0,
+          "exact_match_rate": 1.0,
+          "task_success_proxy_rate": 1.0,
+          "supported_pairs_proxy": 40,
+          "claim_citation_pairs": 40,
+          "citation_support_proxy_rate": 1.0,
+          "unanswerable_count": 0,
+          "answerable_count": 20,
+          "refused_unanswerable_count": 0,
+          "false_refusal_count": 0,
+          "mean_answer_char_f1": 1.0
+        },
+        "new_short": {
+          "count": 40,
+          "schema_valid_rate": 1.0,
+          "exact_match_rate": 1.0,
+          "task_success_proxy_rate": 1.0,
+          "supported_pairs_proxy": 40,
+          "claim_citation_pairs": 40,
+          "citation_support_proxy_rate": 1.0,
+          "unanswerable_count": 0,
+          "answerable_count": 40,
+          "refused_unanswerable_count": 0,
+          "false_refusal_count": 0,
+          "mean_answer_char_f1": 1.0
+        },
+        "new_unspecified": {
+          "count": 40,
+          "schema_valid_rate": 1.0,
+          "exact_match_rate": 1.0,
+          "task_success_proxy_rate": 1.0,
+          "supported_pairs_proxy": 0,
+          "claim_citation_pairs": 0,
+          "citation_support_proxy_rate": null,
+          "unanswerable_count": 40,
+          "answerable_count": 0,
+          "refused_unanswerable_count": 40,
+          "false_refusal_count": 0,
+          "mean_answer_char_f1": null
+        }
+      },
+      "agent_status_counts": {
+        "INSUFFICIENT_EVIDENCE": 81,
+        "ANSWERED": 99
+      },
+      "latency_ms": {
+        "p50": 1053.2573189993855,
+        "p95": 2200.232440017862
+      },
+      "total_output_tokens": 4631,
+      "total_generation_seconds": 153.8705709539645,
+      "peak_gpu_allocated_bytes": 2994594816,
+      "raw_outputs_sha256": "e6e8db3924749cf5d2584e23bc69b2e8c49ab2ae6009770352a94c0ed9da52c6",
+      "limitations": [
+        "AI-assisted synthetic source-group holdout",
+        "lexical support proxy, not semantic proof",
+        "single concurrency; no retrieval timing; no external model API"
+      ]
+    }
+  },
+  "paired_lexical_proxy": {
+    "wins": [
+      "v2-test-0155",
+      "v2-test-0167",
+      "v2-test-0166",
+      "v2-test-0125",
+      "v2-test-0008",
+      "v2-test-0164",
+      "v2-test-0035",
+      "v2-test-0110",
+      "v2-test-0107",
+      "v2-test-0134",
+      "v2-test-0093",
+      "v2-test-0044",
+      "v2-test-0017",
+      "v2-test-0053",
+      "v2-test-0091",
+      "v2-test-0161",
+      "v2-test-0083",
+      "v2-test-0092",
+      "v2-test-0179",
+      "v2-test-0127",
+      "v2-test-0173",
+      "v2-test-0071",
+      "v2-test-0002",
+      "v2-test-0157",
+      "v2-test-0095",
+      "v2-test-0152",
+      "v2-test-0176",
+      "v2-test-0103",
+      "v2-test-0038",
+      "v2-test-0119"
+    ],
+    "regressions": [],
+    "delta": 0.16666666666666666,
+    "groups": 20,
+    "cluster_bootstrap_95_percentile": [
+      0.1111111111111111,
+      0.2222222222222222
+    ],
+    "seed": 20260911,
+    "resamples": 10000
+  },
+  "full_chain": {
+    "base": {
+      "cases": 80,
+      "unanswerable_refused": 40,
+      "unanswerable_count": 40,
+      "false_refusals": 3,
+      "answerable_count": 40,
+      "gold_alignment_pairs": 8,
+      "all_citation_pairs": 53,
+      "latency_ms_p50": 3403.6,
+      "latency_ms_p95": 4051.8108,
+      "total_seconds": 276.678001
+    },
+    "sft": {
+      "cases": 80,
+      "unanswerable_refused": 40,
+      "unanswerable_count": 40,
+      "false_refusals": 3,
+      "answerable_count": 40,
+      "gold_alignment_pairs": 9,
+      "all_citation_pairs": 38,
+      "latency_ms_p50": 3368.8019999999997,
+      "latency_ms_p95": 3758.36485,
+      "total_seconds": 268.675456
+    }
+  },
+  "source_provenance": [
+    {
+      "git_commit": "d3dbcefbfaa1e54464473384a0952a1f2a5dcdfd",
+      "git_dirty": false,
+      "exported_files_verified": 204,
+      "source_manifest_sha256": "1ac092842558cfe0315407b9d3101ac4b9b87316415e0fde37b81b31ac92b662",
+      "base_model": "Qwen/Qwen3-4B",
+      "revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+      "arguments": {
+        "mode": "eval",
+        "model": "models/Qwen3-4B",
+        "dataset": "source-v6/experiments/qwen3-sft-v2",
+        "output": "runs/base-v2-test-v1",
+        "adapter": null,
+        "split": "test",
+        "limit": 0,
+        "rank": 16,
+        "epochs": 2,
+        "learning_rate": 0.0001,
+        "max_length": 1536,
+        "max_new_tokens": 384,
+        "seed": 20260911
+      },
+      "dataset_manifest_sha256": "cc886080e4c6f609792285e0c7466f7ad5689746b84b1c62679bba202f5f8cf0",
+      "python": "3.12.7",
+      "host": "node16",
+      "gpu": "NVIDIA GeForce RTX 4090 D",
+      "torch_cuda": "12.6",
+      "bnb_cuda_version_override": "124",
+      "cuda_visible_devices": "0",
+      "packages": {
+        "torch": "2.7.0",
+        "transformers": "4.51.3",
+        "peft": "0.15.2",
+        "accelerate": "1.6.0",
+        "bitsandbytes": "0.45.5"
+      },
+      "quantization": "4-bit NF4 double quantization; BF16 compute",
+      "external_model_api_used": false,
+      "download_manifest_sha256": "b8f335d4408127fee659d67aaed467fd5a0e9956740cc849629c49883dafff75",
+      "adapter_sha256": null
+    },
+    {
+      "git_commit": "d3dbcefbfaa1e54464473384a0952a1f2a5dcdfd",
+      "git_dirty": false,
+      "exported_files_verified": 204,
+      "source_manifest_sha256": "1ac092842558cfe0315407b9d3101ac4b9b87316415e0fde37b81b31ac92b662",
+      "base_model": "Qwen/Qwen3-4B",
+      "revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+      "arguments": {
+        "mode": "eval",
+        "model": "models/Qwen3-4B",
+        "dataset": "source-v6/experiments/qwen3-sft-v2",
+        "output": "runs/sft-v2-test-v1",
+        "adapter": "runs/qlora-v3/adapter",
+        "split": "test",
+        "limit": 0,
+        "rank": 16,
+        "epochs": 2,
+        "learning_rate": 0.0001,
+        "max_length": 1536,
+        "max_new_tokens": 384,
+        "seed": 20260911
+      },
+      "dataset_manifest_sha256": "cc886080e4c6f609792285e0c7466f7ad5689746b84b1c62679bba202f5f8cf0",
+      "python": "3.12.7",
+      "host": "node16",
+      "gpu": "NVIDIA GeForce RTX 4090 D",
+      "torch_cuda": "12.6",
+      "bnb_cuda_version_override": "124",
+      "cuda_visible_devices": "0",
+      "packages": {
+        "torch": "2.7.0",
+        "transformers": "4.51.3",
+        "peft": "0.15.2",
+        "accelerate": "1.6.0",
+        "bitsandbytes": "0.45.5"
+      },
+      "quantization": "4-bit NF4 double quantization; BF16 compute",
+      "external_model_api_used": false,
+      "download_manifest_sha256": "b8f335d4408127fee659d67aaed467fd5a0e9956740cc849629c49883dafff75",
+      "adapter_sha256": "c7f642d6d89a6551b3d13f64a459673b87512ca5212b7833af58f223c18b92c3"
+    }
+  ],
+  "inference": {
+    "git_commit": "d3dbcefbfaa1e54464473384a0952a1f2a5dcdfd",
+    "git_dirty": false,
+    "exported_files_verified": 204,
+    "source_manifest_sha256": "1ac092842558cfe0315407b9d3101ac4b9b87316415e0fde37b81b31ac92b662",
+    "base_model": "Qwen/Qwen3-4B",
+    "revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+    "arguments": {
+      "model": "models/Qwen3-4B",
+      "adapter": "runs/qlora-v3/adapter",
+      "dataset": "source-v6/experiments/qwen3-sft-v2",
+      "port": 18080,
+      "max_new_tokens": 384,
+      "seed": 20260911
+    },
+    "dataset_manifest_sha256": "cc886080e4c6f609792285e0c7466f7ad5689746b84b1c62679bba202f5f8cf0",
+    "python": "3.12.7",
+    "host": "node16",
+    "gpu": "NVIDIA GeForce RTX 4090 D",
+    "torch_cuda": "12.6",
+    "bnb_cuda_version_override": "124",
+    "cuda_visible_devices": "0",
+    "packages": {
+      "torch": "2.7.0",
+      "transformers": "4.51.3",
+      "peft": "0.15.2",
+      "accelerate": "1.6.0",
+      "bitsandbytes": "0.45.5"
+    },
+    "quantization": "4-bit NF4 double quantization; BF16 compute",
+    "external_model_api_used": false,
+    "download_manifest_sha256": "b8f335d4408127fee659d67aaed467fd5a0e9956740cc849629c49883dafff75",
+    "adapter_sha256": "c7f642d6d89a6551b3d13f64a459673b87512ca5212b7833af58f223c18b92c3"
+  },
+  "release_decision": "experimental adapter verified; default unchanged; do not claim general semantic accuracy improvement",
+  "limitations": [
+    "AI-assisted synthetic source-group holdout, not teacher blind labels",
+    "lexical matching is not semantic faithfulness or answer correctness",
+    "original course QA gold labels omit some valid source facts",
+    "full-chain comparison is a regression test, not an independent external benchmark",
+    "one seed; single concurrency; unmerged LoRA latency reported separately"
+  ]
+}
