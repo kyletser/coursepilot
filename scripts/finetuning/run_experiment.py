@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import importlib.metadata
 import json
+import os
 import platform
 import random
 import re
@@ -133,6 +134,8 @@ def provenance(args):
         "host": platform.node(),
         "gpu": torch.cuda.get_device_name(0),
         "torch_cuda": torch.version.cuda,
+        "bnb_cuda_version_override": os.environ.get("BNB_CUDA_VERSION"),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "packages": {
             name: importlib.metadata.version(name)
             for name in ("torch", "transformers", "peft", "accelerate", "bitsandbytes")

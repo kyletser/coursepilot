@@ -33,6 +33,15 @@
 
 不预填任何提升数字。引用词法匹配只能称代理评测，不称严格语义蕴含。若没有观察到可靠增益，报告负结果并继续在开发集定位，不调整测试标签迎合模型。
 
-## 官方参考
+## 环境排障记录
+
+服务器 Ubuntu 20.04 的 glibc 不满足 bitsandbytes 0.45.5 自带 CUDA 12.6
+二进制的 GLIBC_2.34 要求；PyTorch CUDA 张量运算本身通过。服务器已有 CUDA
+12.4，且该包的 cuda124 动态库依赖检查通过，因此仅给实验进程设置
+`BNB_CUDA_VERSION=124`，不升级系统 glibc、不修改公共 CUDA 安装。此覆盖方式
+见 [bitsandbytes 官方说明](https://huggingface.co/docs/bitsandbytes/v0.45.4/installation)。
+原模型和微调模型必须使用相同覆盖配置，并由实际量化加载、生成和反向传播验证。
+
+## 官方参考链接
 
 QLoRA 的量化与 PEFT 训练方式参考 [PEFT quantization 文档](https://huggingface.co/docs/peft/developer_guides/quantization)。模型与许可证见 [Qwen3-4B 模型卡](https://huggingface.co/Qwen/Qwen3-4B)。部署导入参考 [Ollama 文档](https://docs.ollama.com/import)。依赖只调用公开 API，不复制第三方训练框架实现。
