@@ -231,6 +231,8 @@ def train(args):
         dataloader_num_workers=0,
         dataloader_pin_memory=False,
         remove_unused_columns=False,
+        label_names=["labels"],
+        prediction_loss_only=True,
         disable_tqdm=True,
     )
     trainer = Trainer(
