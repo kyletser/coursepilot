@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -25,6 +26,28 @@ from app.agent import AgentRequest, OpenAICompatibleChatAdapter, TrustedAgentCor
 from app.agent.schemas import Evidence
 
 SOURCE_SHA = "a976d1fd5efc173bd58ff1c57e958de5f49fed633a7bfb8e0e402e5490d75f5e"
+
+
+def matches_reference(claims, row):
+    texts = [
+        claim.text for claim in claims if row["gold_label"] in claim.citation_labels
+    ]
+    if "answer_groups" not in row:
+        return any(
+            normalized(a) in normalized(text) for text in texts for a in row["answers"]
+        )
+    # Separate claims may cover distinct requested fields, but must cite the gold source.
+    return all(
+        any(
+            re.search(
+                r"(?<![0-9a-z])" + re.escape(normalized(a)) + r"(?![0-9a-z])",
+                normalized(text),
+            )
+            for a in alternatives
+            for text in texts
+        )
+        for alternatives in row["answer_groups"]
+    )
 
 
 class RecordingTransport(httpx.AsyncBaseTransport):
@@ -236,14 +259,7 @@ async def evaluate(args):
                         ),
                         evidence=row["evidence"],
                     )
-                    supported_span = any(
-                        row["gold_label"] in claim.citation_labels
-                        and any(
-                            normalized(a) in normalized(claim.text)
-                            for a in row["answers"]
-                        )
-                        for claim in response.claims
-                    )
+                    supported_span = matches_reference(response.claims, row)
                     pairs = [
                         (claim.text, label)
                         for claim in response.claims
@@ -261,6 +277,9 @@ async def evaluate(args):
                         "response": response.model_dump(mode="json"),
                         "model_calls": transport.calls,
                         "reference_span_with_gold_source": supported_span,
+                        "answer_check": "predeclared atomic groups"
+                        if "answer_groups" in row
+                        else "reference span",
                         "literal_supported_pairs": literal,
                         "all_pairs": len(pairs),
                         "latency_ms": (time.perf_counter() - started) * 1000,
@@ -268,10 +287,10 @@ async def evaluate(args):
                     results.append(record)
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                     handle.flush()
-                    print(f"EXTERNAL {index + 1}/50 {alias}", flush=True)
+                    print(f"EXTERNAL {index + 1}/{len(rows)} {alias}", flush=True)
         summary = {
             alias: {
-                "count": 50,
+                "count": len(rows),
                 "span_success_count": sum(
                     r["reference_span_with_gold_source"]
                     for r in results

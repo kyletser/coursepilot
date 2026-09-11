@@ -4,11 +4,17 @@ import asyncio
 from unittest.mock import patch
 
 import httpx
-from run_external_qa import FewShotAdapter, RecordingTransport, training_demonstrations
+from run_external_qa import (
+    FewShotAdapter,
+    RecordingTransport,
+    matches_reference,
+    training_demonstrations,
+)
 
 # Standalone helper establishes the application import path.
 # isort: split
 from app.agent.grounding import GenerationPrompt
+from app.agent.schemas import AnswerDraft
 
 
 def test_capture_is_transparent_and_excludes_authorization():
@@ -81,3 +87,18 @@ def test_demonstrations_only_read_train():
         _, info = training_demonstrations(Path("unused"))
     loader.assert_called_once_with(Path("unused"), "train")
     assert info["example_ids"] == ["a", "c"]
+
+
+def test_atomic_keys_require_all_fields_and_correct_source():
+    def claims(text, label=1):
+        return AnswerDraft.model_validate(
+            {"claims": [{"text": text, "citation_labels": [label]}]}
+        ).claims
+
+    row = {"gold_label": 1, "answer_groups": [["振华道"], ["佐敦谷北道"]]}
+    assert matches_reference(claims("连接振华道和佐敦谷北道。"), row)
+    assert not matches_reference(claims("连接振华道。"), row)
+    assert not matches_reference(claims("连接振华道和佐敦谷北道。", 2), row)
+    number = {"gold_label": 1, "answer_groups": [["836"]]}
+    assert matches_reference(claims("有836人。"), number)
+    assert not matches_reference(claims("有1836人。"), number)

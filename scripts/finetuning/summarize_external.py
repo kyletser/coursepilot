@@ -7,7 +7,8 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from run_experiment import normalized, percentile, sha256, write_json
+from run_experiment import percentile, sha256, write_json
+from run_external_qa import matches_reference
 
 # run_experiment establishes standalone imports.
 # isort: split
@@ -36,11 +37,13 @@ def summarize(args):
     )
     summaries = {}
     success_ids = {}
+    task_ids = {}
     for variant in provenance["variants"]:
         selected = [r for r in rows if r["model"] == variant]
         if len(selected) != len(gold) or {r["id"] for r in selected} != set(gold):
             raise ValueError("incomplete or duplicate external cases")
         valid, raw_span, raw_empty, prompt_tokens, completion_tokens = 0, 0, 0, 0, 0
+        raw_negative_refusals, raw_false_refusals = 0, 0
         for row in selected:
             payloads = []
             for call in row["model_calls"]:
@@ -62,25 +65,45 @@ def summarize(args):
             valid += 1
             raw_empty += not draft.claims
             target = gold[row["id"]]
-            raw_span += any(
-                target["gold_label"] in claim.citation_labels
-                and any(
-                    normalized(a) in normalized(claim.text) for a in target["answers"]
-                )
-                for claim in draft.claims
-            )
+            if not draft.claims:
+                if target.get("is_answerable", True):
+                    raw_false_refusals += 1
+                else:
+                    raw_negative_refusals += 1
+            raw_span += matches_reference(draft.claims, target)
         success_ids[variant] = {
             r["id"]
             for r in selected
             if r["response"]["status"] == "ANSWERED"
             and r["reference_span_with_gold_source"]
         }
+        negative_ids = {
+            key for key, row in gold.items() if not row.get("is_answerable", True)
+        }
+        negative_refusals = {
+            r["id"]
+            for r in selected
+            if r["id"] in negative_ids
+            and r["response"]["status"] == "INSUFFICIENT_EVIDENCE"
+        }
+        task_ids[variant] = success_ids[variant] | negative_refusals
         summaries[variant] = {
             "count": len(selected),
             "first_output_schema_valid": valid,
             "first_output_empty_claims": raw_empty,
             "first_output_span_with_gold_source": raw_span,
             "answered_span_with_gold_source": len(success_ids[variant]),
+            "answerable_count": len(gold) - len(negative_ids),
+            "unanswerable_count": len(negative_ids),
+            "refused_unanswerable_count": len(negative_refusals),
+            "false_refusal_count": sum(
+                r["id"] not in negative_ids
+                and r["response"]["status"] == "INSUFFICIENT_EVIDENCE"
+                for r in selected
+            ),
+            "first_output_refused_unanswerable": raw_negative_refusals,
+            "first_output_false_refusals": raw_false_refusals,
+            "task_success_count": len(task_ids[variant]),
             "status_counts": dict(Counter(r["response"]["status"] for r in selected)),
             "prompt_tokens_including_retries": prompt_tokens,
             "completion_tokens_including_retries": completion_tokens,
@@ -97,12 +120,21 @@ def summarize(args):
         "schema": "coursepilot.external-generation-audit/1",
         "summaries": summaries,
         "paired_answered_span_vs_base": paired,
+        "paired_task_vs_base": {
+            variant: {
+                "wins": sorted(ids - task_ids["coursepilot-qwen3-base"]),
+                "regressions": sorted(task_ids["coursepilot-qwen3-base"] - ids),
+            }
+            for variant, ids in task_ids.items()
+            if variant != "coursepilot-qwen3-base"
+        },
         "provenance": provenance,
         "raw_outputs_sha256": sha256(args.run / "outputs.jsonl"),
         "limitations": [
-            "50 selected evidence-conditioned CMRC trial questions; not official EM/F1",
+            "selected evidence-conditioned CMRC trial questions; not official EM/F1",
             "reference-span inclusion with source label does not prove whole-answer correctness",
-            "no unanswerable external cases; cannot estimate external abstention recall",
+            "missing-evidence negatives, if present, are constructed; see per-variant denominators",
+            "public dataset may have appeared in base-model pretraining; exposure is unknown",
             "few-shot uses longer context; timings single concurrency and include HTTP/Agent overhead",
         ],
     }
