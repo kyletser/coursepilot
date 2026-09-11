@@ -4,6 +4,21 @@ Updated 2026-09-11. In progress; not a final report or resume evidence.
 
 ## V2 candidate fixed before new test generation
 
+New test now complete, raw artifacts copied to ignored
+`tmp/finetuning/evidence-evaluation-v2`: base lexical proxy 147/180, SFT 177/180;
+raw unanswerable refusal 74/80 → 80/80, false refusal 0/100 → 1/100;
+generation P95 1.323s → 2.200s. These are synthetic evidence-conditioned measures,
+not semantic QA accuracy. The three SFT proxy failures include a real skip-list
+abstention, an additional supported signal fact, and a concise B-tree answer.
+Gold labels and scoring were not changed after inspecting them.
+
+Real course comparison is running against the independent database copy through
+the v2 adapter endpoint (hash verified). Data Structures completed: both models
+refuse 20/20 unanswerable and falsely refuse 1/20 answerable. The previous v1
+linked-list-condition failure now answers correctly, with the same condition as
+base. OS and the external three-way comparison are still pending. Default Ollama
+remains unchanged; no final promotion decision yet.
+
 `runs/qlora-v3` completed 1 epoch / 181 optimizer steps on 1,448 training examples.
 Wall time 598.124 seconds; peak allocated GPU memory 6,640,988,160 bytes; development
 loss 0.0030913625. Saved adapter SHA256:

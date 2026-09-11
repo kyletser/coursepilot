@@ -81,6 +81,12 @@ ssh -p 131 -N -L 127.0.0.1:18080:127.0.0.1:18080 ccnu@10.131.148.21
 `eval` 运行固定 50 条给定证据问答。原始响应、重试及最终 Agent 输出分别保留；
 摘要降级单独计数。这不是官方 CMRC EM/F1，也不作为训练数据。
 
+本轮外部三方案对照在 `eval` 时添加
+`--few-shot-training experiments/qwen3-sft-v2`：原模型、QLoRA、原模型 two-shot。
+示例只取训练集的两个固定 ID，增加的输入 Token 单独统计。
+运行完成后用 `summarize_external.py --dataset <固定数据目录> --run <运行目录>
+--output <新的汇总文件>` 审计首轮生成、最终回答、摘要降级和实际 Token 成本。
+
 ## 发布与失败处理
 
 保留失败日志，不覆盖 run；根据阶段选择新输出目录重新运行。
