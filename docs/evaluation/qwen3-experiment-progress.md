@@ -37,9 +37,31 @@ exported file hashes in `source_provenance.json`; the harmless git lookup error
 precedes this fallback. Future source edits must use a new archive, never patch
 an already recorded experiment's source directory.
 
+## Verified training completion
+
+`qlora-v2` finished both epochs in 497.04 seconds. Development losses were
+0.00553608 (epoch 1) and 0.00562742 (epoch 2); the saved adapter comes from
+checkpoint-86 (epoch 1), chosen by the predeclared lowest-loss rule. Peak allocated
+GPU memory was 5,792,137,216 bytes. Adapter SHA256:
+`dd13c58d13bc6b052c75dd1ab9ac0383e9bdc2301840f33b69aa3a8b50600f85`.
+Training result and provenance have been copied to local ignored `tmp/finetuning/qlora-v2`.
+
+Saved-adapter development generation completed successfully. Paired test runs
+are live under parent PID 5654, log `runs/paired-evaluation-v1.log`, using source-v4
+for both models. Full test conclusions are pending; do not tune using test outputs.
+
+The original frozen evaluation database was found in Ubuntu WSL's native Docker,
+distinct from Docker Desktop's empty default database. It was backed up and restored
+to a **new** Docker Desktop database `coursepilot_sft_eval`; original data was not
+overwritten. Windows lexical-index paths still exist. BGE caches were not found, so
+fixed-revision, hash-verified downloads are in progress in `data/models/`:
+BGE-M3 `5617a9f61b028005a4858fdac845db406aefb181` and reranker
+`953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`. Metadata is retained in ignored
+`tmp/finetuning`. Do not claim the restored retrieval environment is ready yet.
+
 ## Remaining gates
 
-1. Confirm development eval_loss is present and checkpoint selection completes.
+1. Training/checkpoint-selection gate passed; preserve its logs and hashes.
 2. Load saved adapter and evaluate original/trained on the untouched test under
    the same source version, precision, prompt and hardware. Preserve all outputs.
 3. Audit failures and paraphrases: lexical matching can undercount valid concise
