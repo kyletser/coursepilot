@@ -1,7 +1,9 @@
 # Qwen3 证据约束微调：复现入口
 
-这里只是实验工具，不会自动替换 CoursePilot 默认模型。真实结论和限制见
-`docs/evaluation/qwen3-v1-results.md`，最新阶段见实验执行记录。
+这里只是实验工具，不会自动替换 CoursePilot 默认模型。两轮训练和对照均已完成，
+真实结论和限制见 [最终报告](../../docs/evaluation/qwen3-final-report.md)。
+2026-09-12 简历数字与面试复现要求见 [配套说明](../../docs/interview/coursepilot-resume-guide.md)。
+v1 结果与执行记录作为历史保留，不代表仍需继续训练。
 
 ## 固定工件
 

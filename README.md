@@ -124,8 +124,13 @@ CI 对每个提交执行后端迁移与测试、前端 lint/typecheck/build，�
 Agent 接入验证。微调作为技术实践与取舍实验，不声称全面提高准确率，默认
 Ollama 配置保持不变。
 
+2026-09-12 简历材料统一为“可信问答、检索优化、数据与状态治理、模型微调”四条。
+检索数字来自两门课程 200 条冻结样本；微调数字来自 50 个问题的有/无证据配对
+共 100 条输入，缺证据拒答 46/50→50/50，正例字段覆盖均为 47/50，不代表全面提升。
+
 - [最终实验报告](docs/evaluation/qwen3-final-report.md)
 - [可直接使用的简历项目块](docs/interview/coursepilot-resume-final.md)
+- [最终版逐条说明、数字映射与复现检查](docs/interview/coursepilot-resume-guide.md)
 - [微调原理与面试追问](docs/interview/qwen3-finetuning-explained.md)
 - [训练、评测和部署复现](scripts/finetuning/README.md)
 - [机器报告与原始记录归档](evaluation-reports/2026-09-11/README.md)

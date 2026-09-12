@@ -1,23 +1,27 @@
 # CoursePilot：可直接使用的简历版本
 
-核对日期：2026-09-11。不使用淘汰的个人简历。微调用于展示真实训练、评估与
+核对日期：2026-09-12。不使用淘汰的个人简历。微调用于展示真实训练、评估与
 部署经验，不声称它必然优于原模型。每条的解释见后附证据映射和追问手册。
 
 ## 推荐项目块
 
-**CoursePilot｜可信课程学习 Agent｜核心开发者**
+**CoursePilot｜可信个性化学习 Agent**
 
-面向高校计算机课程，基于教师发布资料构建带引用问答、审核知识图谱、诊断测验与个性化学习路径，保障课程知识来源和学习状态可追溯。
+面向高校计算机课程，构建基于教师资料的学习助手，支持带引用问答、知识图谱审核、诊断测验与个性化学习路径。
 
-技术栈：Python / FastAPI / PostgreSQL·pgvector / Redis·Celery / Neo4j / BGE / PyTorch·PEFT / Ollama
+技术栈：Python / FastAPI / PostgreSQL·pgvector / Redis / Celery / Neo4j / BGE-M3 / Qwen3 / QLoRA
 
-- **可信编排与知识边界**：设计显式 Agent 流程，串联意图路由、证据门控、限次 Query Rewrite 和 Claim–Citation 校验；服务端重新验证课程与索引覆盖集，支持证据不足拒答，防止跨课程、跨版本引用。
-- **检索优化与对照评测**：实现 BGE-M3 与 BM25 双路召回、RRF 融合及 Cross-Encoder 重排；在两门课程 200 条冻结检索样例上，Recall@5 从 94.5% 提升至 100%，MRR@5 从 88.4% 提升至 98.6%，保留各阶段延迟与降级记录。
-- **审核与异步一致性**：以 PostgreSQL 保存审核事实，通过 Outbox 向 Neo4j 幂等投影；测验作答与 Beta-Bernoulli 掌握度同事务更新，使用幂等键与行锁控制重复提交，Celery/Redis 承载入库与评测任务。
-- **参数高效微调与模型评估**：基于 PyTorch/PEFT 对 Qwen3-4B 完成 QLoRA SFT，采用 NF4、响应区间 loss mask 和来源分组隔离，以约 0.81% 可训练参数完成 1,448 条样本训练；对比原模型、two-shot 与微调方案，并通过 OpenAI-compatible 接口接入 Agent 验证。
+- **可信问答：**设计显式 Agent 编排流程，串联意图路由、证据门控、Query Rewrite 与结构化生成；通过 Claim—Citation 绑定、服务端引用校验及证据不足拒答，约束模型回答范围，并校验课程与索引版本归属。
+- **检索优化：**实现 BGE-M3 与 BM25 双路并发召回，结合 RRF 融合与 BGE Reranker 重排，支持召回、重排组件独立降级；在冻结的 200 条课程检索样本上，Recall@5 从 94.5% 提升至 100%，MRR@5 从 0.884 提升至 0.986。
+- **数据与状态治理：**采用 Celery/Redis 承载长耗时任务，以 PostgreSQL Outbox 将教师审核知识幂等投影至 Neo4j；通过事务、幂等键与行锁处理重复作答，基于审核题目更新 Beta-Bernoulli 掌握度并生成学习路径。
+- **模型微调：**基于 1,448 条训练样本完成 Qwen3-4B 的 QLoRA 监督微调，对比原模型、Few-shot 与微调方案；在 100 条独立构造的对照样本中，缺证据正确拒答由 46/50 提升至 50/50，并通过端到端回归识别事实选择退化，保留原模型作为默认配置。
 
-版面不足时，微调条目保留“QLoRA / NF4 / loss mask / 分组隔离 / 三方案对照”，
-删去训练样本数；不要为了塞技术名把完整句子压成清单。
+本节是唯一维护的可复制项目块，其他配套文档链接到此，不再维护竞争版本。
+版面不足时优先删去次要参数，不删去数字的样本量或结果限制。
+“独立”仅指与本次训练隔离；100 条来自 50 个问题的有/无证据配对输入，
+不是 100 个独立问题，也不是独立人工盲标；基座预训练是否见过源资料未知。
+1,448 条为 AI 辅助构造样本，不称为人工标注的真实用户数据。
+简历四条逐项解释、取舍和复现要求见 [最终版配套说明](coursepilot-resume-guide.md)。
 
 ## 微调专项投递可替换的一条
 
@@ -32,7 +36,7 @@
 |---|---|---|
 | 200 条检索 / Recall / MRR | `docs/evaluation/agent-evaluation-2026-09-05.md` 与当日原始冻结报告 | 两门演示课程；不是百万文档或线上规模；与微调收益分开 |
 | 1,448 条 / 0.81% / 6.64 GB | `docs/evaluation/qwen3-final-report.md`、v2 archive 中的训练 result/provenance | AI 辅助训练数据；allocated 显存，不是整机内存；没有全参训练对照 |
-| 三方案对照 | `qwen3-v2-contrast-summary.json` 与紧凑原始记录 | 50 有证据 + 50 构造缺证据；不称 CMRC 官方成绩 |
+| 三方案对照 / 拒答 46→50 | `evaluation-reports/2026-09-11/qwen3-v2-contrast-summary.json` 与紧凑原始记录 | 50 有证据 + 50 构造缺证据；正例同为 47/50；不称 CMRC 官方成绩或语义准确率 |
 | 明确拒答 | `apps/api/app/agent/core.py`、`test_finetuning_contracts.py` | 空 claims 不再被当作生成失败后改成无关摘要 |
 | 引用计数 | `apps/api/app/evaluation/runner.py`、同上回归测试 | 修复漏计，但词法对齐不是语义蕴含 |
 | 审核与掌握度 | graph / learning 模块、相关事务测试 | 不声称彻底解决 Outbox 乱序和所有并发边界；学生路径不是实时 Neo4j 多跳问答 |
