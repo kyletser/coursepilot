@@ -614,9 +614,7 @@ async def retry_ingestion_job(
         # without creating a new document version or duplicating candidates.
         raw_recovery_history = details.get("recovery_history")
         recovery_history = (
-            list(raw_recovery_history)
-            if isinstance(raw_recovery_history, list)
-            else []
+            list(raw_recovery_history) if isinstance(raw_recovery_history, list) else []
         )
         recovery_history.append(
             {
